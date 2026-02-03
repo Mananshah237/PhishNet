@@ -93,6 +93,52 @@ $docker = "C:\Program Files\Docker\Docker\resources\bin\docker.exe"
 & $docker ps
 ```
 
+---
+
+## Optional AI (OpenAI) ✨
+
+PhishNet supports an **optional** OpenAI-powered rewrite.
+
+- If OpenAI is configured, the rewrite becomes higher-quality and more natural.
+- If OpenAI is **not** configured (or the API call fails), PhishNet **automatically falls back** to the built-in rule-based rewrite.
+
+### Step-by-step: enable the AI rewrite
+
+1) Create a `.env` file in the repo root (same folder as `docker-compose.yml`).
+
+```env
+# Optional AI (OpenAI)
+OPENAI_API_KEY=YOUR_OPENAI_KEY_HERE
+OPENAI_MODEL=gpt-4o-mini
+```
+
+2) Rebuild and restart the API container:
+
+```powershell
+$docker = "C:\Program Files\Docker\Docker\resources\bin\docker.exe"
+
+[Environment]::SetEnvironmentVariable(
+  "Path",
+  "C:\Program Files\Docker\Docker\resources\bin;" + [Environment]::GetEnvironmentVariable("Path","Process"),
+  "Process"
+)
+
+& $docker compose up -d --build api
+```
+
+3) In the UI (http://localhost:3000):
+- Check **“Use LLM rewrite (optional) ✨”**
+- Upload an `.eml`
+
+### How to verify it’s using AI
+- When AI is used successfully, the API returns `used_llm: true` in the rewrite result.
+- The UI shows `(used_llm: yes)`.
+
+### Security note
+Even with AI enabled, PhishNet enforces safety:
+- Any URLs in the AI output are stripped and replaced with `[LINK REMOVED]`.
+- The client still never receives raw email HTML.
+
 ### Open in browser
 - Web UI: http://localhost:3000
 - API health: http://localhost:8000/health
