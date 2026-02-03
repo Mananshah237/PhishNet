@@ -71,6 +71,7 @@ export default function Home() {
 
   async function refreshEmails(selectFirst = false) {
     const res = await fetch(`${base}/emails`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`Failed to load emails: ${res.status}`);
     const data = (await res.json()) as EmailListItem[];
     setEmails(data);
     if (selectFirst && data.length && !selectedId) {
@@ -104,8 +105,17 @@ export default function Home() {
       if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
       const data = await res.json();
       const id = data.email_id as string;
+
+      // Demo-friendly: automatically analyze right after upload.
+      setBusyMsg('Analyzing…');
       await refreshEmails(false);
       setSelectedId(id);
+      await loadEmail(id);
+
+      // Auto-run detection + rewrite so users don't wonder why nothing happened.
+      await fetch(`${base}/emails/${id}/detect`, { method: 'POST' });
+      const qs = new URLSearchParams({ use_llm: useLlm ? 'true' : 'false' });
+      await fetch(`${base}/emails/${id}/rewrite?${qs.toString()}`, { method: 'POST' });
       await loadEmail(id);
     } catch (e: any) {
       setError(String(e));
@@ -176,29 +186,45 @@ export default function Home() {
   }, [selectedId]);
 
   return (
-    <main style={{ maxWidth: 1200 }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-        <div>
-          <h1 style={{ marginBottom: 4 }}>PhishNet</h1>
-          <div style={{ color: '#444' }}>MVP demo UI — upload .eml → detect → rewrite (no raw HTML to client).</div>
-        </div>
-        <div style={{ fontSize: 12, color: '#666' }}>
-          API: <code>{base}</code> {health?.ok ? <Badge text="OK" bg="#065f46" /> : null}
+    <main style={{ maxWidth: 1280, margin: '0 auto' }}>
+      <div
+        style={{
+          border: '1px solid rgba(255,255,255,0.12)',
+          borderRadius: 18,
+          padding: 16,
+          background: 'linear-gradient(135deg, rgba(99,102,241,0.16), rgba(236,72,153,0.10))',
+          boxShadow: '0 18px 60px rgba(0,0,0,0.35)'
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
+          <div>
+            <h1 style={{ margin: 0, fontSize: 34, letterSpacing: -0.5 }}>
+              PhishNet 
+              <span style={{ fontSize: 18, opacity: 0.9 }}>🛡️🎣</span>
+            </h1>
+            <div style={{ color: 'rgba(229,231,235,0.85)', marginTop: 6 }}>
+              Upload a suspicious email → get a risk score + safe rewrite → (next) Open Safely screenshots.
+            </div>
+          </div>
+          <div style={{ fontSize: 12, color: 'rgba(229,231,235,0.85)' }}>
+            API: <code style={{ color: '#fff' }}>{base}</code> {health?.ok ? <Badge text="OK" bg="#16a34a" /> : null}
+          </div>
         </div>
       </div>
 
       <section
         style={{
           marginTop: 16,
-          padding: 12,
-          border: '1px solid #e5e7eb',
-          borderRadius: 12,
-          background: '#fafafa'
+          padding: 14,
+          border: '1px solid rgba(255,255,255,0.14)',
+          borderRadius: 18,
+          background: 'rgba(255,255,255,0.06)',
+          backdropFilter: 'blur(10px)'
         }}
       >
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-          <label style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
-            <strong>Upload .eml</strong>
+          <label style={{ display: 'inline-flex', gap: 10, alignItems: 'center' }}>
+            <strong style={{ fontSize: 14 }}>Upload .eml ✉️</strong>
             <input
               type="file"
               accept=".eml,message/rfc822"
@@ -209,17 +235,29 @@ export default function Home() {
             />
           </label>
 
+          <label style={{ display: 'inline-flex', gap: 8, alignItems: 'center', color: 'rgba(229,231,235,0.9)' }}>
+            <input type="checkbox" checked={useLlm} onChange={(e) => setUseLlm(e.target.checked)} />
+            Use LLM rewrite (optional) ✨
+          </label>
+
           <button
             onClick={() => refreshEmails(false)}
-            style={{ padding: '8px 10px', borderRadius: 10, border: '1px solid #ddd', background: 'white' }}
+            style={{
+              padding: '9px 12px',
+              borderRadius: 12,
+              border: '1px solid rgba(255,255,255,0.18)',
+              background: 'rgba(0,0,0,0.25)',
+              color: '#fff',
+              cursor: 'pointer'
+            }}
           >
-            Refresh list
+            Refresh list ↻
           </button>
 
           <div style={{ flex: 1 }} />
 
-          {busyMsg ? <span style={{ color: '#444' }}>{busyMsg}</span> : null}
-          {error ? <span style={{ color: '#b91c1c' }}>{error}</span> : null}
+          {busyMsg ? <span style={{ color: 'rgba(229,231,235,0.9)' }}>{busyMsg}</span> : null}
+          {error ? <span style={{ color: '#fca5a5' }}>{error}</span> : null}
         </div>
       </section>
 

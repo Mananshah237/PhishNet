@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
 from typing import Any
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -81,6 +82,26 @@ def html_to_text(html: str) -> str:
         return ""
     soup = BeautifulSoup(html, "lxml")
     return soup.get_text("\n", strip=True)
+
+
+def _domain_from_from_header(from_header: str | None) -> str | None:
+    if not from_header:
+        return None
+    m = re.search(r"@([A-Za-z0-9.-]+)", from_header)
+    if not m:
+        return None
+    return m.group(1).lower().strip(".")
+
+
+def _host_from_url(u: str) -> str | None:
+    try:
+        return urlparse(u).hostname
+    except Exception:
+        return None
+
+
+def _looks_like_ip(host: str) -> bool:
+    return bool(re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host))
 
 
 # ---- API models -------------------------------------------------------------
@@ -217,26 +238,87 @@ def get_email(email_id: str):
 def detect(email_id: str):
     rec = _load_email(email_id)
     text = (rec.get("body", {}) or {}).get("text", "") or ""
+    urls: list[str] = (rec.get("links", {}) or {}).get("urls", []) or []
 
     reasons: list[str] = []
     score = 0
 
+    t = text.lower()
+
     # MVP heuristics (replace later with model)
-    urgent_words = ["urgent", "immediately", "verify", "password", "suspended", "locked", "invoice", "payment"]
-    if any(w in text.lower() for w in urgent_words):
+    urgent_words = [
+        "urgent",
+        "immediately",
+        "verify",
+        "password",
+        "suspended",
+        "locked",
+        "invoice",
+        "payment",
+        "action required",
+        "security alert",
+        "unusual activity",
+        "confirm your account",
+    ]
+    if any(w in t for w in urgent_words):
         reasons.append("Urgent / coercive language")
         score += 25
 
-    if "http://" in text.lower() or "https://" in text.lower():
-        reasons.append("Contains URLs")
-        score += 20
-
-    if "gift" in text.lower() or "prize" in text.lower() or "winner" in text.lower():
-        reasons.append("Too-good-to-be-true incentive language")
+    cred_words = ["login", "sign in", "verify", "password", "2fa", "otp", "code", "account"]
+    if any(w in t for w in cred_words):
+        reasons.append("Credential-harvesting language")
         score += 15
 
+    # URL-based signals (more reliable than body text)
+    if urls:
+        reasons.append(f"Contains {len(urls)} URL(s)")
+        score += min(30, 10 + 5 * len(urls))
+
+    sender_domain = _domain_from_from_header((rec.get("headers", {}) or {}).get("from"))
+
+    suspicious_tlds = {"zip", "mov", "top", "xyz", "click", "icu"}
+    shorteners = {"bit.ly", "t.co", "tinyurl.com", "goo.gl", "is.gd", "cutt.ly"}
+
+    for u in urls[:10]:
+        host = (_host_from_url(u) or "").lower().strip(".")
+        if not host:
+            continue
+
+        if host.startswith("xn--"):
+            reasons.append("Punycode domain (possible homograph)")
+            score += 12
+
+        if _looks_like_ip(host):
+            reasons.append("Link uses a raw IP address")
+            score += 15
+
+        if host in shorteners:
+            reasons.append("Uses URL shortener")
+            score += 10
+
+        tld = host.split(".")[-1] if "." in host else ""
+        if tld in suspicious_tlds:
+            reasons.append(f"Suspicious TLD: .{tld}")
+            score += 8
+
+        if sender_domain and sender_domain not in host:
+            # Weak signal, but good in a demo.
+            reasons.append("Sender domain does not match link domain")
+            score += 10
+
+        if re.search(r"@", u):
+            reasons.append("URL contains '@' (possible obfuscation)")
+            score += 10
+
+        if re.search(r"%[0-9A-Fa-f]{2}", u):
+            reasons.append("URL contains encoded characters (obfuscation)")
+            score += 6
+
+    # Normalize
+    reasons = sorted(set(reasons))
+
     score = max(0, min(100, score))
-    label = "phishing" if score >= 50 else "suspicious" if score >= 25 else "benign"
+    label = "phishing" if score >= 60 else "suspicious" if score >= 30 else "benign"
 
     rec.setdefault("analysis", {})["detection"] = {"label": label, "risk_score": score, "reasons": reasons}
     _save_email(rec)
