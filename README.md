@@ -79,12 +79,12 @@ Use this exact command set:
 
 ```powershell
 # From repo root
-$docker = "C:\Program Files\Docker\Docker\resources\bin\docker.exe"
+$docker = "C:\'Program Files'\Docker\Docker\resources\bin\docker.exe"
 
 # Ensure Docker credential helper is discoverable for this terminal session
 [Environment]::SetEnvironmentVariable(
   "Path",
-  "C:\Program Files\Docker\Docker\resources\bin;" + [Environment]::GetEnvironmentVariable("Path","Process"),
+  "C:\'Program Files'\Docker\Docker\resources\bin;" + [Environment]::GetEnvironmentVariable("Path","Process"),
   "Process"
 )
 
@@ -115,11 +115,11 @@ OPENAI_MODEL=gpt-4o-mini
 2) Rebuild and restart the API container:
 
 ```powershell
-$docker = "C:\Program Files\Docker\Docker\resources\bin\docker.exe"
+$docker = "C:\'Program Files'\Docker\Docker\resources\bin\docker.exe"
 
 [Environment]::SetEnvironmentVariable(
   "Path",
-  "C:\Program Files\Docker\Docker\resources\bin;" + [Environment]::GetEnvironmentVariable("Path","Process"),
+  "C:\'Program Files'\Docker\Docker\resources\bin;" + [Environment]::GetEnvironmentVariable("Path","Process"),
   "Process"
 )
 
@@ -220,7 +220,7 @@ That’s expected in **default-deny** mode (no network). Use **allow target orig
 
 ### Docker command not found
 Use the full path:
-- `C:\Program Files\Docker\Docker\resources\bin\docker.exe`
+- `C:\'Program Files'\Docker\Docker\resources\bin\docker.exe`
 
 ---
 
