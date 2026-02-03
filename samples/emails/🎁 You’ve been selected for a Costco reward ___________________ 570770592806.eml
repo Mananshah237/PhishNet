@@ -1,0 +1,105 @@
+Delivered-To: mgrocksmanan@gmail.com
+Received: by 2002:a17:907:26c3:b0:b87:1ffc:bfa3 with SMTP id bp3csp613704ejc;
+        Sat, 31 Jan 2026 02:36:57 -0800 (PST)
+X-Received: by 2002:a17:907:1b13:b0:b87:d09c:1826 with SMTP id a640c23a62f3a-b8dff6df777mr335913066b.51.1769855817694;
+        Sat, 31 Jan 2026 02:36:57 -0800 (PST)
+ARC-Seal: i=1; a=rsa-sha256; t=1769855817; cv=none;
+        d=google.com; s=arc-20240605;
+        b=Pl7P4bLjEtytZK8InkMpZstaBMZk/BBMSZDCJyNST1WyXPz2PDfonqy+/dbJKqfK+9
+         yZlFx8Nl6NGKVjeZaSsfced/vVs/WCAfoQ0gFHwtubL/YqAlicI0Jp9t8RMzve4TkfHZ
+         IGVPxPJjrsYACtu21tzsTb5rvDwgO+rervak1fO2ot+oi0TgYE5iVj+dWfxjdnY8RcUj
+         TKo5ZEDurRLItxocoRI0L0vrPWzrdbUHDyiOtoXLzu9nRnLZUu6uDWEOOpAQ4zXD7xxw
+         Etj2w8XcASFAqz5JCAXhe8QYOwJ8dZ1iRwgipKeTfrKzl5Y4EyeW1Izo4p6hLMh/h2qw
+         Rl0g==
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20240605;
+        h=message-id:date:subject:from:to:mime-version;
+        bh=+S5GfpEzxJzB+BAEhaxO9lxWzdnQcTfh49VpWx8pM3k=;
+        fh=e7PNBEjeEZewdAQv1ijrIKafFN/EeNL09Uhq7q2CoA8=;
+        b=GneaV+oS1/nHDA8G3hqGcJ54G4IoHx1w0QLoeZBZ9YxVymTMWOD1zDVIt3KGdQNbh0
+         4dTIFsIkmtqhMLKu1UgPLkIy67bh2ITIZ+IIl0sJCB8Ig+YQO+ngNuzzu7C3+2VrTCG/
+         1Hcl3fWsEzpGC8GSF9tZ81TqxLvch8mt312boyGfmYSk/5dgSheyJhJKfwr2rsvP1ZXZ
+         aZ9Y1+ShyPHHn/qK7q/U75gLVs5/QiELg0rfjFIcdUwC9v9oP+rF2hHKgljV1J8QO8PB
+         OU1ifj+jAaIDeTYLFTFkCGSqRi8CBXyNZKfQXNu6OuLXDufa36yx627jXN8+uFD65tLa
+         f8sA==;
+        dara=google.com
+ARC-Authentication-Results: i=1; mx.google.com;
+       spf=pass (google.com: domain of tamztyyivddpuspgai@getamplifa.info designates 54.38.192.224 as permitted sender) smtp.mailfrom=TAMZTyYiVddpUSpGAI@getamplifa.info
+Return-Path: <TAMZTyYiVddpUSpGAI@getamplifa.info>
+Received: from fi458zychb.com (ns31131612.ip-54-38-192.eu. [54.38.192.224])
+        by mx.google.com with ESMTPS id a640c23a62f3a-b8de330453bsi573942366b.219.2026.01.31.02.36.57
+        for <mgrocksmanan@gmail.com>
+        (version=TLS1 cipher=ECDHE-ECDSA-AES128-SHA bits=128/128);
+        Sat, 31 Jan 2026 02:36:57 -0800 (PST)
+Received-SPF: pass (google.com: domain of tamztyyivddpuspgai@getamplifa.info designates 54.38.192.224 as permitted sender) client-ip=54.38.192.224;
+Authentication-Results: mx.google.com;
+       spf=pass (google.com: domain of tamztyyivddpuspgai@getamplifa.info designates 54.38.192.224 as permitted sender) smtp.mailfrom=TAMZTyYiVddpUSpGAI@getamplifa.info
+MIME-version: 1.0
+Content-type: text/html
+To:mgrocksmanan@gmail.com
+From: "Costaco"<w9gp1A55xIQI0DA8hT@w9gp1A55xIQI0DA8hT.com> 
+Subject: 🎁 You’ve been selected for a Costco reward  ___________________ 570770592806
+Date: Sat, 31 Jan 2026 05:36:57 -0500
+X-Mailer: 675152097
+Message-ID: <w9gp1A55xIQI0DA8hT_675152097@fi458zychb.com>
+
+<a href="https://storage.googleapis.com/malkomx/jomaliek/msaoks/dazdazd/soummails.html?3794908IS17088588dY675152097nE17367Ml24Evr240929Us"  title="open" target="_blank" style="text-decoration:none; color: #000; display: block; padding:15px;">
+
+
+
+<div style="background-color: #f6f6f6; padding: 20px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+    <table align="center" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 600px; background-color: #ffffff; border: 1px solid #dddddd; border-radius: 8px; overflow: hidden;">
+        
+        <tr>
+            <td style="background-color: #005da4; padding: 20px; text-align: center;">
+                <span style="color: #ffffff; font-size: 70px; font-weight: bold; letter-spacing: 1px;">Costco </span>
+            </td>
+        </tr>
+
+        <tr>
+            <td style="padding: 40px 30px; text-align: center;">
+                <h1 style="color: #333333; font-size: 24px; margin: 0 0 20px 0;">We Value Your Opinion!</h1>
+                <p style="color: #666666; font-size: 16px; line-height: 1.5; margin: 0 0 25px 0;">
+                    Complete our quick member experience survey and you could be eligible to receive a 
+                    <strong style="color: #333333;">Premium Selection Meat Box</strong>.
+                </p>
+
+                <div style="margin-bottom: 30px;">
+                    <img src=" " alt="Reward Selection" width="100%" style="max-width: 400px; height: auto; border-radius: 4px; border: 1px solid #eeeeee;">
+                </div>
+
+                <span style="background-color: #e31837; color: #ffffff; padding: 18px 45px; text-decoration: none; font-size: 18px; font-weight: bold; border-radius: 5px; display: inline-block; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                    CLAIM YOUR REWARD
+                </span>
+
+                <p style="color: #d9534f; font-size: 13px; font-weight: bold; margin-top: 25px; text-transform: uppercase;">
+                    ⏱ Invitation Expires: 2026.01.31
+                </p>
+            </td>
+        </tr>
+
+        <tr>
+            <td style="padding: 0 30px 40px 30px;">
+                <table width="100%" style="border-top: 1px solid #eeeeee; padding-top: 20px;">
+                    <tr>
+                        <td style="text-align: center; color: #888888; font-size: 14px;">
+                            <p style="margin: 5px 0;">Takes less than 2 minutes</p>
+                            <p style="margin: 5px 0;">No purchase necessary</p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+
+        <tr>
+            <td style="background-color: #f9f9f9; padding: 20px; text-align: center; color: #999999; font-size: 12px; line-height: 1.4;">
+                <p style="margin: 0 0 10px 0;">
+                    &copy; 2026 Wholesale Feedback Program. All rights reserved.
+                </p>
+                <p style="margin: 0;"></a><center>
+                    <a href="https://storage.googleapis.com/malkomx/jomaliek/msaoks/dazdazd/soummails.html?3794908Vh17088588jG675152097KX17367qX24imu240929PI" style="color: #005da4; text-decoration: underline;">Unsubscribe</a> | 
+                    <a href="https://storage.googleapis.com/malkomx/jomaliek/msaoks/dazdazd/soummails.html?3794908MH17088588sG675152097kP17367lT24Vbr240929Ic" style="color: #005da4; text-decoration: underline;">Privacy Policy</a>
+                </p>
+            </td>
+        </tr>
+    </table>
+</div>

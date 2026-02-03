@@ -14,3 +14,13 @@ apps/web/out/
 
 # env
 .env
+
+# openclaw agent workspace (not part of the product repo)
+AGENTS.md
+BOOTSTRAP.md
+HEARTBEAT.md
+SOUL.md
+USER.md
+TOOLS.md
+IDENTITY.md
+memory/
