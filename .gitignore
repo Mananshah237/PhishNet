@@ -1,0 +1,16 @@
+# artifacts / runtime
+artifacts/
+
+# node
+**/node_modules/
+
+# next
+apps/web/.next/
+apps/web/out/
+
+# python
+**/__pycache__/
+*.pyc
+
+# env
+.env
