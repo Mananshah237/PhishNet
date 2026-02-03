@@ -313,7 +313,7 @@ def detect(email_id: str, db: Session = Depends(get_db)):
         reasons.append(f"Contains {len(urls)} URL(s)")
         score += min(30, 10 + 5 * len(urls))
 
-    sender_domain = _domain_from_from_header((rec.get("headers", {}) or {}).get("from"))
+    sender_domain = _domain_from_from_header(e.from_addr)
 
     suspicious_tlds = {"zip", "mov", "top", "xyz", "click", "icu"}
     shorteners = {"bit.ly", "t.co", "tinyurl.com", "goo.gl", "is.gd", "cutt.ly"}
