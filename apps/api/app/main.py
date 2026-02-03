@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import httpx
 
+from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
@@ -153,7 +154,7 @@ class OpenSafelyRequest(BaseModel):
 @app.get("/health")
 def health(db: Session = Depends(get_db)):
     # Light DB ping
-    db.execute("SELECT 1")
+    db.execute(sql_text("SELECT 1"))
     return {"ok": True, "artifact_dir": _artifact_dir(), "db": "ok"}
 
 
