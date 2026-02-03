@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: phishnet
+      POSTGRES_PASSWORD: phishnet
+      POSTGRES_DB: phishnet
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: ./apps/api
+    environment:
+      DATABASE_URL: postgresql+psycopg://phishnet:phishnet@db:5432/phishnet
+      ARTIFACT_DIR: /artifacts
+      # Runner image name used by the orchestrator when we add job execution
+      RUNNER_IMAGE: phishnet-runner:dev
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./artifacts:/artifacts
+    depends_on:
+      - db
+
+  web:
+    build:
+      context: ./apps/web
+    environment:
+      NEXT_PUBLIC_API_BASE: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  db_data:
