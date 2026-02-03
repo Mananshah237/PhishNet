@@ -1,252 +1,189 @@
 # PhishNet 🛡️🎣
 
-PhishNet is a standalone phishing-analysis dashboard that:
+**PhishNet** is a standalone phishing-analysis dashboard designed to safely analyze suspicious emails without exposing the client to danger.
 
-- Ingests suspicious emails (**upload `.eml`** for MVP; Gmail read-only integration is planned)
-- Detects phishing and assigns a **risk score (0–100)** with human-readable reasons
-- Produces a **safe rewrite** of the email (rule-based always; LLM optional)
-- Provides **Open Safely**: a screenshot-only preview of suspicious links rendered in an isolated runner
+- **Ingest:** Upload `.eml` files (Gmail read-only integration planned).
+- **Detect:** Assigns a **risk score (0–100)** with human-readable reasons.
+- **Rewrite:** Produces a **safe version** of the email (rule-based default; LLM optional).
+- **Open Safely:** Renders suspicious links in an isolated runner, delivering only screenshots to the user.
 
-> **Security promise (MVP):** The client never receives raw dangerous HTML and never clicks live links.
-
----
-
-## What you get in the MVP
-
-- Web UI (Next.js): email list + dual-panel viewer
-- API (FastAPI): ingestion, detection, rewrite, Open Safely orchestration
-- Runner (Playwright): renders suspicious URLs in a sandbox and outputs **desktop + mobile screenshots** + IOCs
-- Postgres container included (schema usage is planned; MVP stores email records as JSON in `artifacts/`)
+> **Security Promise (MVP):** The client never receives raw dangerous HTML and never clicks live links.
 
 ---
 
-## Architecture (high level)
+## 🚀 What you get in the MVP
+
+* **Web UI (Next.js):** Responsive email list + dual-panel viewer.
+* **API (FastAPI):** Handles ingestion, detection, rewriting, and orchestration.
+* **Runner (Playwright):** Isolated sandbox that renders URLs and captures **desktop + mobile screenshots**.
+* **Persistence:** Artifacts stored as JSON in `artifacts/` (Postgres container included for future schema migration).
+
+---
+
+## 🏗️ Architecture
 
 ```
-Browser (UI)  ──HTTP──▶  FastAPI (API)  ──HTTP──▶  Runner (Playwright)
-      │                    │                           │
-      │                    └── reads/writes artifacts ──┘
-      └──── shows ONLY sanitized data + screenshots ─────
+graph LR
+    User[Browser UI] -- HTTP --> API[FastAPI Backend]
+    API -- HTTP --> Runner[Playwright Runner]
+    API -- Read/Write --> Disk[(Artifacts/JSON)]
+    Runner -- Read/Write --> Disk
+
 ```
 
-- **apps/web**: Next.js UI
-- **apps/api**: FastAPI backend
-- **apps/runner**: Playwright sandbox renderer (HTTP service)
-- **artifacts/**: local artifact vault for MVP (emails, screenshots, IOC JSON)
+* **apps/web**: Next.js UI
+* **apps/api**: FastAPI backend
+* **apps/runner**: Playwright sandbox renderer (HTTP service)
+* **artifacts/**: Local artifact vault (emails, screenshots, IOCs)
 
 ---
 
-## Non‑negotiable security policies (MVP)
+## 🔒 Security Policies (MVP)
 
-- **No raw dangerous HTML delivered to the client**
-- **All displayed links are defanged / non-clickable**
-- **Open Safely is screenshot-only** (no interactive remote browsing in MVP)
-- Runner is **default-deny** for outbound network access
+1. **No raw dangerous HTML** is ever sent to the client.
+2. **All links are defanged** and non-clickable in the UI.
+3. **Runner is default-deny** for outbound network access.
 
-### Open Safely network policy (MVP)
+### "Open Safely" Network Policy
 
-Two modes:
+When a user requests to view a suspicious link, two modes are available:
 
-1) **Default (safest):** deny all outbound network
-   - Runner loads nothing external
-   - Screenshot may be blank/error page (still valuable for demo + grading)
-
-2) **Optional (explicit):** `allow_target_origin=true`
-   - Allow only the **exact target origin**
-   - Block everything else: third-party scripts, CDNs, analytics, ads, fonts, trackers
-   - Block obvious private/localhost targets
-
-Policy statement:
-> “Allow only the target origin; deny everything else.”
+| Mode | Behavior | Use Case |
+| --- | --- | --- |
+| **Default (Safest)** | **Deny All.** No network traffic allowed. | safest analysis; screenshots may be blank. |
+| **Open Safely ✨** | **Target Origin Only.** Allows strictly the destination domain. Blocks ads, trackers, CDNs, and fonts. | Visual verification of the phishing page. |
 
 ---
 
-## Quickstart (Windows + Docker Desktop)
+## ⚡ Quickstart (Windows + Docker Desktop)
 
-### Prereqs
-- Docker Desktop (Linux containers)
-- Git
+### Prerequisites
 
-### Clone
+* Docker Desktop (Linux containers mode)
+* Git
+
+### 1. Clone the Repository
+
 ```powershell
-git clone https://github.com/Mananshah237/PhishNet.git
+git clone [https://github.com/Mananshah237/PhishNet.git](https://github.com/Mananshah237/PhishNet.git)
 cd PhishNet
+
 ```
 
-### Run locally
-Docker Desktop installs `docker.exe`, but on some systems `docker-credential-desktop.exe` is not on PATH in a fresh terminal.
-Use this exact command set:
+### 2. Run with Docker Compose
+
+*Note: On Windows, `docker` is sometimes not in the PATH for new terminals. Use this exact PowerShell snippet to run the project:*
 
 ```powershell
-# 1. Set the correct path (without internal quotes)
+# 1. Set the correct path to the executable
 $docker = "C:\Program Files\Docker\Docker\resources\bin\docker.exe"
 
-# 2. Add to PATH for the current session so credentials work
+# 2. Add to PATH for the current session (fixes credential errors)
 $env:Path = "C:\Program Files\Docker\Docker\resources\bin;" + $env:Path
 
-# 3. Verify it works
+# 3. Verify Docker is reachable
 & $docker --version
 
-# 4. Run the project
+# 4. Build and Run
 & $docker compose build
 & $docker compose up -d
+
 ```
 
----
+### 3. Open in Browser
 
-## Optional AI (OpenAI) ✨
+* **Web UI:** [http://localhost:3000](https://www.google.com/search?q=http://localhost:3000)
+* **API Health:** [http://localhost:8000/health](https://www.google.com/search?q=http://localhost:8000/health)
 
-PhishNet supports an **optional** OpenAI-powered rewrite.
+To stop the services:
 
-- If OpenAI is configured, the rewrite becomes higher-quality and more natural.
-- If OpenAI is **not** configured (or the API call fails), PhishNet **automatically falls back** to the built-in rule-based rewrite.
-
-### Step-by-step: enable the AI rewrite
-
-1) Create a `.env` file in the repo root (same folder as `docker-compose.yml`).
-
-```env
-# Optional AI (OpenAI)
-OPENAI_API_KEY=YOUR_OPENAI_KEY_HERE
-OPENAI_MODEL=gpt-4o-mini
-```
-
-2) Rebuild and restart the API container:
-
-```powershell
-$docker = "C:\'Program Files'\Docker\Docker\resources\bin\docker.exe"
-
-[Environment]::SetEnvironmentVariable(
-  "Path",
-  "C:\'Program Files'\Docker\Docker\resources\bin;" + [Environment]::GetEnvironmentVariable("Path","Process"),
-  "Process"
-)
-
-& $docker compose up -d --build api
-```
-
-3) In the UI (http://localhost:3000):
-- Check **“Use LLM rewrite (optional) ✨”**
-- Upload an `.eml`
-
-### How to verify it’s using AI
-- When AI is used successfully, the API returns `used_llm: true` in the rewrite result.
-- The UI shows `(used_llm: yes)`.
-
-### Security note
-Even with AI enabled, PhishNet enforces safety:
-- Any URLs in the AI output are stripped and replaced with `[LINK REMOVED]`.
-- The client still never receives raw email HTML.
-
-### Open in browser
-- Web UI: http://localhost:3000
-- API health: http://localhost:8000/health
-
-### Stop
 ```powershell
 & $docker compose down
+
 ```
 
 ---
 
-## How to use (demo flow)
+## ✨ Optional AI (OpenAI)
 
-1) Open http://localhost:3000
-2) Upload a suspicious `.eml` file
-3) The UI will automatically:
-   - run **Detection** (risk score + reasons)
-   - generate **Safe rewrite** (rule-based always)
-4) In **Defanged links**, click:
-   - **Open Safely 👀 (no network)** or
-   - **Open Safely ✨ (allow target origin)**
+PhishNet includes an optional LLM-powered rewrite engine.
 
-A modal appears with:
-- Desktop screenshot
-- Mobile screenshot
+* **Enabled:** Produces higher-quality, natural-sounding safe summaries.
+* **Disabled/Failed:** Automatically falls back to the robust rule-based rewrite.
 
-Artifacts are stored under:
-- `artifacts/emails/<email_id>.json`
-- `artifacts/open-safely/<job_id>/desktop.png`
-- `artifacts/open-safely/<job_id>/mobile.png`
-- `artifacts/open-safely/<job_id>/iocs.json`
-- `artifacts/open-safely/<job_id>/meta.json`
+**How to enable:**
 
----
+1. Create a `.env` file in the root directory:
+```env
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o-mini
 
-## API (MVP)
+```
 
-Base: `http://localhost:8000`
 
-### Health
-- `GET /health`
-
-### Email ingestion
-- `POST /ingest/upload-eml` (multipart form-data: `file`)
-
-### Email browsing
-- `GET /emails`
-- `GET /emails/{email_id}` (returns **text only**, no raw HTML)
-
-### Detection + rewrite
-- `POST /emails/{email_id}/detect`
-- `POST /emails/{email_id}/rewrite?use_llm=false|true`
-  - If `use_llm=true` **and** `OPENAI_API_KEY` is set, the API will use OpenAI to produce a higher-quality safe rewrite.
-  - If the LLM call fails or no key is set, it **automatically falls back** to the rule-based rewrite.
-
-### Open Safely
-- `POST /emails/{email_id}/open-safely`
-  - body: `{ "link_index": 0, "allow_target_origin": false }`
-- `GET /open-safely/{job_id}/desktop.png`
-- `GET /open-safely/{job_id}/mobile.png`
-- `GET /open-safely/{job_id}/iocs.json`
-- `GET /open-safely/{job_id}/meta.json`
-
----
-
-## Troubleshooting
-
-### UI shows "Failed to fetch"
-- Ensure API is running and CORS is enabled (it is in this repo).
-- Check container status:
-
+2. Rebuild the API container:
 ```powershell
-& $docker compose ps
-& $docker compose logs --tail 200 api web
+& $docker compose up -d --build api
+
 ```
 
-### Open Safely screenshots look blank
-That’s expected in **default-deny** mode (no network). Use **allow target origin** mode to load only the destination origin.
 
-### Docker command not found
-Use the full path:
-- `C:\'Program Files'\Docker\Docker\resources\bin\docker.exe`
+3. In the UI, toggle **"Use LLM rewrite (optional) ✨"** before uploading.
 
 ---
 
-## Hosting (notes)
+## 📖 API Reference (MVP)
 
-This project includes a Playwright/Chromium runner, which is heavy and often not compatible with “free” hosting.
+**Base URL:** `http://localhost:8000`
 
-Recommended for demos:
-- **Run locally using Docker Compose** (most reliable)
+### Core Endpoints
 
-If you want public hosting:
-- Host **web** on Vercel/Cloudflare Pages
-- Host **api + runner** on a container/VPS (cheap VPS is simplest)
+* `POST /ingest/upload-eml` - Upload `.eml` file.
+* `GET /emails/{email_id}` - Get sanitized email text (no raw HTML).
+* `POST /emails/{email_id}/detect` - Run phishing detection logic.
+* `POST /emails/{email_id}/rewrite` - Generate safe version (`?use_llm=true` optional).
+
+### Open Safely Endpoints
+
+* `POST /emails/{email_id}/open-safely`
+* Body: `{ "link_index": 0, "allow_target_origin": false }`
+
+
+* `GET /open-safely/{job_id}/desktop.png` - View result.
 
 ---
 
-## Roadmap (post-MVP)
+## 🛠️ Troubleshooting
 
-- Gmail OAuth read-only integration
-- Proper DB persistence (Postgres schema + migrations)
-- Background job queue (Redis + RQ/Celery)
-- More robust IOC extraction
-- Attachment metadata → detonation (future)
-- Audit logs + encryption at rest (final hardening)
+**"Failed to fetch" in UI**
+
+* Ensure the API container is running.
+* Check logs: `& $docker compose logs --tail 200 api web`
+
+**Open Safely screenshots are blank**
+
+* This is expected in **Default** mode (network denied). Use **Open Safely ✨** to allow the target page to load.
+
+**Docker command not found**
+
+* Ensure you are using the variable `& $docker` defined in the Quickstart, or add Docker to your system PATH permanently.
+
+---
+
+## 🗺️ Roadmap
+
+* [ ] Gmail OAuth read-only integration
+* [ ] Proper DB persistence (Postgres schema + migrations)
+* [ ] Background job queue (Redis + RQ/Celery)
+* [ ] Advanced IOC extraction
+* [ ] Attachment metadata analysis
 
 ---
 
 ## License
 
-TBD (add one if/when needed).
+TBD
+
+```
+
+```
