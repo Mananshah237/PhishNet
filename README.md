@@ -78,19 +78,18 @@ Docker Desktop installs `docker.exe`, but on some systems `docker-credential-des
 Use this exact command set:
 
 ```powershell
-# From repo root
-$docker = "C:\'Program Files'\Docker\Docker\resources\bin\docker.exe"
+# 1. Set the correct path (without internal quotes)
+$docker = "C:\Program Files\Docker\Docker\resources\bin\docker.exe"
 
-# Ensure Docker credential helper is discoverable for this terminal session
-[Environment]::SetEnvironmentVariable(
-  "Path",
-  "C:\'Program Files'\Docker\Docker\resources\bin;" + [Environment]::GetEnvironmentVariable("Path","Process"),
-  "Process"
-)
+# 2. Add to PATH for the current session so credentials work
+$env:Path = "C:\Program Files\Docker\Docker\resources\bin;" + $env:Path
 
+# 3. Verify it works
+& $docker --version
+
+# 4. Run the project
 & $docker compose build
 & $docker compose up -d
-& $docker ps
 ```
 
 ---
