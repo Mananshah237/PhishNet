@@ -16,14 +16,23 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://phishnet:phishnet@db:5432/phishnet
       ARTIFACT_DIR: /artifacts
-      # Runner image name used by the orchestrator when we add job execution
-      RUNNER_IMAGE: phishnet-runner:dev
+      RUNNER_BASE_URL: http://runner:7070
     ports:
       - "8000:8000"
     volumes:
       - ./artifacts:/artifacts
     depends_on:
       - db
+      - runner
+
+  runner:
+    build:
+      context: ./apps/runner
+    environment:
+      OUT_DIR: /out
+    volumes:
+      - ./artifacts:/out
+    # no published ports needed; API talks to runner over the docker network
 
   web:
     build:

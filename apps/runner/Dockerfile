@@ -7,7 +7,10 @@ RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 COPY . .
 
+ENV OUT_DIR=/out
+EXPOSE 7070
+
 # Runner writes artifacts to /out by convention
 VOLUME ["/out"]
 
-CMD ["node", "run.js"]
+CMD ["node", "server.js"]

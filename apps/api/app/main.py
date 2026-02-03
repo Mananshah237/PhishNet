@@ -13,7 +13,9 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+import httpx
 
 app = FastAPI(title="PhishNet API", version="0.1.0")
 
@@ -124,6 +126,11 @@ class RewriteResult(BaseModel):
     safe_subject: str | None = None
     safe_body: str
     used_llm: bool
+
+
+class OpenSafelyRequest(BaseModel):
+    link_index: int
+    allow_target_origin: bool = False
 
 
 @app.get("/health")
@@ -350,3 +357,71 @@ def rewrite(email_id: str, use_llm: bool = False):
     _save_email(rec)
 
     return RewriteResult(safe_subject=subj, safe_body=safe, used_llm=used_llm)
+
+
+@app.post("/emails/{email_id}/open-safely")
+async def open_safely(email_id: str, req: OpenSafelyRequest):
+    rec = _load_email(email_id)
+    urls: list[str] = (rec.get("links", {}) or {}).get("urls", []) or []
+    if req.link_index < 0 or req.link_index >= len(urls):
+        raise HTTPException(status_code=400, detail="invalid link_index")
+
+    url = urls[req.link_index]
+    job_id = str(uuid.uuid4())
+
+    runner = os.getenv("RUNNER_BASE_URL", "http://runner:7070")
+
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        r = await client.post(
+            f"{runner}/render",
+            json={
+                "url": url,
+                "job": job_id,
+                "outSubdir": "open-safely",
+                "allowTargetOrigin": bool(req.allow_target_origin),
+            },
+        )
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail={"runner_error": r.text})
+
+    data = r.json()
+    rec.setdefault("analysis", {}).setdefault("open_safely", {})[job_id] = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "link_index": req.link_index,
+        "allow_target_origin": bool(req.allow_target_origin),
+    }
+    _save_email(rec)
+
+    return {
+        "job_id": job_id,
+        "artifacts": {
+            "desktop": f"/open-safely/{job_id}/desktop.png",
+            "mobile": f"/open-safely/{job_id}/mobile.png",
+            "iocs": f"/open-safely/{job_id}/iocs.json",
+            "text": f"/open-safely/{job_id}/text.txt",
+            "meta": f"/open-safely/{job_id}/meta.json",
+        },
+    }
+
+
+@app.get("/open-safely/{job_id}/{name}")
+def get_open_safely_artifact(job_id: str, name: str):
+    # Serve read-only artifacts produced by the runner.
+    allowed = {"desktop.png", "mobile.png", "iocs.json", "text.txt", "meta.json"}
+    if name not in allowed:
+        raise HTTPException(status_code=404, detail="not found")
+
+    p = os.path.join(_artifact_dir(), "open-safely", job_id, name)
+    if not os.path.exists(p):
+        raise HTTPException(status_code=404, detail="not found")
+
+    media_type = None
+    if name.endswith(".png"):
+        media_type = "image/png"
+    elif name.endswith(".json"):
+        media_type = "application/json"
+    elif name.endswith(".txt"):
+        media_type = "text/plain"
+
+    return FileResponse(p, media_type=media_type)
