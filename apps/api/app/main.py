@@ -11,11 +11,16 @@ from typing import Any
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import httpx
+
+from sqlalchemy.orm import Session
+
+from app.db import SessionLocal
+from app.models import Artifact, Detection, Email, OpenSafelyJob, Rewrite
 
 
 def _openai_enabled() -> bool:
@@ -60,33 +65,18 @@ app.add_middleware(
 )
 
 
-# ---- storage (MVP local) ----------------------------------------------------
+# ---- storage (artifacts on disk; metadata in Postgres) ----------------------
 
 def _artifact_dir() -> str:
     return os.getenv("ARTIFACT_DIR", os.path.abspath(os.path.join(os.getcwd(), "..", "..", "..", "artifacts")))
 
 
-def _emails_dir() -> str:
-    p = os.path.join(_artifact_dir(), "emails")
-    os.makedirs(p, exist_ok=True)
-    return p
-
-
-def _email_path(email_id: str) -> str:
-    return os.path.join(_emails_dir(), f"{email_id}.json")
-
-
-def _save_email(rec: dict[str, Any]) -> None:
-    with open(_email_path(rec["id"]), "w", encoding="utf-8") as f:
-        json.dump(rec, f, indent=2, ensure_ascii=False)
-
-
-def _load_email(email_id: str) -> dict[str, Any]:
-    p = _email_path(email_id)
-    if not os.path.exists(p):
-        raise HTTPException(status_code=404, detail="email not found")
-    with open(p, "r", encoding="utf-8") as f:
-        return json.load(f)
+def get_db() -> Session:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 # ---- utils ------------------------------------------------------------------
@@ -161,17 +151,27 @@ class OpenSafelyRequest(BaseModel):
 
 
 @app.get("/health")
-def health():
-    return {"ok": True, "artifact_dir": _artifact_dir()}
+def health(db: Session = Depends(get_db)):
+    # Light DB ping
+    db.execute("SELECT 1")
+    return {"ok": True, "artifact_dir": _artifact_dir(), "db": "ok"}
 
 
 @app.post("/ingest/upload-eml")
-async def upload_eml(file: UploadFile = File(...)):
+async def upload_eml(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    # Basic size guard (MVP): 2MB
     raw = await file.read()
+    if len(raw) > 2_000_000:
+        raise HTTPException(status_code=413, detail="file too large (max 2MB)")
+
     msg = BytesParser(policy=policy.default).parsebytes(raw)
 
     subject = msg.get("subject")
     from_addr = msg.get("from")
+    to_addr = msg.get("to")
+    date_hdr = msg.get("date")
+
+    raw_headers = "".join([f"{k}: {v}\n" for (k, v) in msg.items()])
 
     # Prefer HTML part; fall back to text.
     html_body = ""
@@ -199,80 +199,84 @@ async def upload_eml(file: UploadFile = File(...)):
 
     combined_for_links = "\n".join([text_body or "", html_body or ""]).strip()
     urls = extract_urls(combined_for_links)
+    defanged = [defang_url(u) for u in urls]
 
-    email_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    email = Email(
+        id=str(uuid.uuid4()),
+        source="upload:eml",
+        subject=subject,
+        from_addr=from_addr,
+        to_addr=to_addr,
+        date_hdr=date_hdr,
+        raw_headers=raw_headers,
+        body_text=text_body or "",
+        body_html=html_body or "",
+        extracted_urls=urls,
+        defanged_urls=defanged,
+        created_at=datetime.now(timezone.utc),
+    )
 
-    rec: dict[str, Any] = {
-        "id": email_id,
-        "source": "upload:eml",
-        "created_at": now,
-        "filename": file.filename,
-        "headers": {
-            "subject": subject,
-            "from": from_addr,
-        },
-        "body": {
-            "html": html_body,
-            "text": text_body,
-        },
-        "links": {
-            "urls": urls,
-            "defanged": [defang_url(u) for u in urls],
-        },
-        "analysis": {},
-    }
+    db.add(email)
+    db.commit()
 
-    _save_email(rec)
-    return {"email_id": email_id}
+    return {"email_id": email.id}
 
 
 @app.get("/emails", response_model=list[EmailListItem])
-def list_emails():
-    items: list[EmailListItem] = []
-    for name in sorted(os.listdir(_emails_dir()), reverse=True):
-        if not name.endswith(".json"):
-            continue
-        with open(os.path.join(_emails_dir(), name), "r", encoding="utf-8") as f:
-            rec = json.load(f)
-        items.append(
-            EmailListItem(
-                id=rec["id"],
-                source=rec.get("source", "unknown"),
-                subject=rec.get("headers", {}).get("subject"),
-                from_addr=rec.get("headers", {}).get("from"),
-                created_at=rec.get("created_at"),
-            )
+def list_emails(db: Session = Depends(get_db)):
+    emails = db.query(Email).order_by(Email.created_at.desc()).limit(200).all()
+    return [
+        EmailListItem(
+            id=e.id,
+            source=e.source,
+            subject=e.subject,
+            from_addr=e.from_addr,
+            created_at=e.created_at.isoformat(),
         )
-    return items
+        for e in emails
+    ]
 
 
 @app.get("/emails/{email_id}")
-def get_email(email_id: str):
-    rec = _load_email(email_id)
+def get_email(email_id: str, db: Session = Depends(get_db)):
+    e = db.query(Email).filter(Email.id == email_id).first()
+    if not e:
+        raise HTTPException(status_code=404, detail="email not found")
+
+    det = db.query(Detection).filter(Detection.email_id == email_id).order_by(Detection.id.desc()).first()
+    rw = db.query(Rewrite).filter(Rewrite.email_id == email_id).order_by(Rewrite.id.desc()).first()
 
     # Important: do NOT return raw HTML to the client.
-    body = rec.get("body", {})
     return {
-        "id": rec["id"],
-        "source": rec.get("source"),
-        "created_at": rec.get("created_at"),
-        "headers": rec.get("headers", {}),
+        "id": e.id,
+        "source": e.source,
+        "created_at": e.created_at.isoformat(),
+        "headers": {
+            "subject": e.subject,
+            "from": e.from_addr,
+            "to": e.to_addr,
+            "date": e.date_hdr,
+        },
         "body": {
-            "text": body.get("text", ""),
+            "text": e.body_text or "",
         },
         "links": {
-            "defanged": rec.get("links", {}).get("defanged", []),
+            "defanged": e.defanged_urls or [],
         },
-        "analysis": rec.get("analysis", {}),
+        "analysis": {
+            "detection": (None if not det else {"label": det.label, "risk_score": det.risk_score, "reasons": det.reasons}),
+            "rewrite": (None if not rw else {"safe_subject": rw.safe_subject, "safe_body": rw.safe_body, "used_llm": rw.used_llm}),
+        },
     }
 
 
 @app.post("/emails/{email_id}/detect", response_model=DetectionResult)
-def detect(email_id: str):
-    rec = _load_email(email_id)
-    text = (rec.get("body", {}) or {}).get("text", "") or ""
-    urls: list[str] = (rec.get("links", {}) or {}).get("urls", []) or []
+def detect(email_id: str, db: Session = Depends(get_db)):
+    e = db.query(Email).filter(Email.id == email_id).first()
+    if not e:
+        raise HTTPException(status_code=404, detail="email not found")
+    text = e.body_text or ""
+    urls: list[str] = e.extracted_urls or []
 
     reasons: list[str] = []
     score = 0
@@ -354,17 +358,21 @@ def detect(email_id: str):
     score = max(0, min(100, score))
     label = "phishing" if score >= 60 else "suspicious" if score >= 30 else "benign"
 
-    rec.setdefault("analysis", {})["detection"] = {"label": label, "risk_score": score, "reasons": reasons}
-    _save_email(rec)
+    # Upsert-style: create a new detection row for traceability.
+    det = Detection(email_id=email_id, label=label, risk_score=score, reasons=reasons, created_at=datetime.now(timezone.utc))
+    db.add(det)
+    db.commit()
 
     return DetectionResult(label=label, risk_score=score, reasons=reasons)
 
 
 @app.post("/emails/{email_id}/rewrite", response_model=RewriteResult)
-async def rewrite(email_id: str, use_llm: bool = False):
-    rec = _load_email(email_id)
-    subj = (rec.get("headers", {}) or {}).get("subject")
-    text = (rec.get("body", {}) or {}).get("text", "") or ""
+async def rewrite(email_id: str, use_llm: bool = False, db: Session = Depends(get_db)):
+    e = db.query(Email).filter(Email.id == email_id).first()
+    if not e:
+        raise HTTPException(status_code=404, detail="email not found")
+    subj = e.subject
+    text = e.body_text or ""
 
     # Guaranteed rule-based rewrite: remove manipulation + strip links.
     safe = text
@@ -413,25 +421,45 @@ async def rewrite(email_id: str, use_llm: bool = False):
             # Keep rule-based safe rewrite on failure.
             used_llm = False
 
-    rec.setdefault("analysis", {})["rewrite"] = {"safe_subject": subj, "safe_body": safe, "used_llm": used_llm}
-    _save_email(rec)
+    rw = Rewrite(email_id=email_id, safe_subject=subj, safe_body=safe, used_llm=used_llm, created_at=datetime.now(timezone.utc))
+    db.add(rw)
+    db.commit()
 
     return RewriteResult(safe_subject=subj, safe_body=safe, used_llm=used_llm)
 
 
 @app.post("/emails/{email_id}/open-safely")
-async def open_safely(email_id: str, req: OpenSafelyRequest):
-    rec = _load_email(email_id)
-    urls: list[str] = (rec.get("links", {}) or {}).get("urls", []) or []
+async def open_safely(email_id: str, req: OpenSafelyRequest, db: Session = Depends(get_db)):
+    e = db.query(Email).filter(Email.id == email_id).first()
+    if not e:
+        raise HTTPException(status_code=404, detail="email not found")
+
+    urls: list[str] = e.extracted_urls or []
     if req.link_index < 0 or req.link_index >= len(urls):
         raise HTTPException(status_code=400, detail="invalid link_index")
 
     url = urls[req.link_index]
     job_id = str(uuid.uuid4())
 
+    job = OpenSafelyJob(
+        job_id=job_id,
+        email_id=email_id,
+        target_url=url,
+        allow_target_origin=bool(req.allow_target_origin),
+        status="queued",
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(job)
+    db.commit()
+
     runner = os.getenv("RUNNER_BASE_URL", "http://runner:7070")
 
-    async with httpx.AsyncClient(timeout=45.0) as client:
+    # Execute synchronously for MVP, but track status like the ADS.
+    job.status = "running"
+    job.started_at = datetime.now(timezone.utc)
+    db.commit()
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
         r = await client.post(
             f"{runner}/render",
             json={
@@ -443,45 +471,100 @@ async def open_safely(email_id: str, req: OpenSafelyRequest):
         )
 
     if r.status_code != 200:
-        raise HTTPException(status_code=502, detail={"runner_error": r.text})
+        job.status = "failed"
+        job.error = r.text
+        job.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(status_code=502, detail={"runner_error": r.text, "job_id": job_id})
 
-    data = r.json()
-    rec.setdefault("analysis", {}).setdefault("open_safely", {})[job_id] = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "link_index": req.link_index,
-        "allow_target_origin": bool(req.allow_target_origin),
+    job.status = "done"
+    job.finished_at = datetime.now(timezone.utc)
+    db.commit()
+
+    # Record artifacts (paths are inside the host-mounted artifacts dir)
+    job_dir = os.path.join(_artifact_dir(), "open-safely", job_id)
+    manifest = {
+        "desktop.png": "image/png",
+        "mobile.png": "image/png",
+        "iocs.json": "application/json",
+        "text.txt": "text/plain",
+        "meta.json": "application/json",
     }
-    _save_email(rec)
 
+    for name, mime in manifest.items():
+        p = os.path.join(job_dir, name)
+        if os.path.exists(p):
+            size = os.path.getsize(p)
+            # sha256 already in meta.json, but compute here for DB integrity when present.
+            sha = None
+            try:
+                import hashlib
+
+                h = hashlib.sha256()
+                with open(p, "rb") as f:
+                    for chunk in iter(lambda: f.read(8192), b""):
+                        h.update(chunk)
+                sha = h.hexdigest()
+            except Exception:
+                sha = None
+
+            db.add(Artifact(job_id=job_id, name=name, rel_path=f"open-safely/{job_id}/{name}", sha256=sha, mime=mime, size_bytes=size, created_at=datetime.now(timezone.utc)))
+
+    db.commit()
+
+    return {"job_id": job_id}
+
+
+@app.get("/open-safely/status/{job_id}")
+def open_safely_status(job_id: str, db: Session = Depends(get_db)):
+    job = db.query(OpenSafelyJob).filter(OpenSafelyJob.job_id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {
+        "job_id": job.job_id,
+        "email_id": job.email_id,
+        "target_url": job.target_url,
+        "allow_target_origin": job.allow_target_origin,
+        "status": job.status,
+        "error": job.error,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
+
+
+@app.get("/open-safely/artifacts/{job_id}")
+def open_safely_artifacts(job_id: str, db: Session = Depends(get_db)):
+    job = db.query(OpenSafelyJob).filter(OpenSafelyJob.job_id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    artifacts = db.query(Artifact).filter(Artifact.job_id == job_id).order_by(Artifact.id.asc()).all()
     return {
         "job_id": job_id,
-        "artifacts": {
-            "desktop": f"/open-safely/{job_id}/desktop.png",
-            "mobile": f"/open-safely/{job_id}/mobile.png",
-            "iocs": f"/open-safely/{job_id}/iocs.json",
-            "text": f"/open-safely/{job_id}/text.txt",
-            "meta": f"/open-safely/{job_id}/meta.json",
-        },
+        "status": job.status,
+        "artifacts": [
+            {
+                "name": a.name,
+                "sha256": a.sha256,
+                "mime": a.mime,
+                "size_bytes": a.size_bytes,
+                "url": f"/open-safely/download/{job_id}?name={a.name}",
+            }
+            for a in artifacts
+        ],
     }
 
 
-@app.get("/open-safely/{job_id}/{name}")
-def get_open_safely_artifact(job_id: str, name: str):
-    # Serve read-only artifacts produced by the runner.
-    allowed = {"desktop.png", "mobile.png", "iocs.json", "text.txt", "meta.json"}
-    if name not in allowed:
+@app.get("/open-safely/download/{job_id}")
+def open_safely_download(job_id: str, name: str, db: Session = Depends(get_db)):
+    # Prevent path traversal: only allow known artifact names from DB.
+    a = db.query(Artifact).filter(Artifact.job_id == job_id, Artifact.name == name).first()
+    if not a:
         raise HTTPException(status_code=404, detail="not found")
 
-    p = os.path.join(_artifact_dir(), "open-safely", job_id, name)
+    p = os.path.join(_artifact_dir(), a.rel_path)
     if not os.path.exists(p):
         raise HTTPException(status_code=404, detail="not found")
 
-    media_type = None
-    if name.endswith(".png"):
-        media_type = "image/png"
-    elif name.endswith(".json"):
-        media_type = "application/json"
-    elif name.endswith(".txt"):
-        media_type = "text/plain"
-
-    return FileResponse(p, media_type=media_type)
+    return FileResponse(p, media_type=a.mime or None)
