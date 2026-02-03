@@ -17,6 +17,33 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import httpx
 
+
+def _openai_enabled() -> bool:
+    return bool(os.getenv("OPENAI_API_KEY"))
+
+
+def _openai_model() -> str:
+    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+
+def _rewrite_prompt(original_text: str) -> str:
+    return (
+        "You are PhishNet, a security-focused email safety assistant. "
+        "Rewrite the email into a SAFE, NEUTRAL version for the user to read.\n\n"
+        "Hard rules:\n"
+        "- Do NOT include any clickable links. Replace any URL with [LINK REMOVED].\n"
+        "- Do NOT include phone numbers, QR codes, or instructions that could lead to compromise.\n"
+        "- Remove emotional manipulation, urgency, and threats.\n"
+        "- Keep factual details that help the user understand what the email is attempting.\n"
+        "- Preserve emojis and friendly formatting if present, but keep tone neutral.\n\n"
+        "Return ONLY the rewritten email body (no commentary, no JSON).\n\n"
+        f"ORIGINAL EMAIL:\n{original_text}"
+    )
+
+
+def _strip_links(text: str) -> str:
+    return re.sub(r"https?://[^\s'\"]+", "[LINK REMOVED]", text or "", flags=re.IGNORECASE)
+
 app = FastAPI(title="PhishNet API", version="0.1.0")
 
 # Allow the local Next.js dev UI to call the API from a different origin (3000 -> 8000).
@@ -334,24 +361,57 @@ def detect(email_id: str):
 
 
 @app.post("/emails/{email_id}/rewrite", response_model=RewriteResult)
-def rewrite(email_id: str, use_llm: bool = False):
+async def rewrite(email_id: str, use_llm: bool = False):
     rec = _load_email(email_id)
     subj = (rec.get("headers", {}) or {}).get("subject")
     text = (rec.get("body", {}) or {}).get("text", "") or ""
 
     # Guaranteed rule-based rewrite: remove manipulation + strip links.
     safe = text
-    safe = re.sub(r"https?://[^\s'\"]+", "[LINK REMOVED]", safe, flags=re.IGNORECASE)
+    safe = _strip_links(safe)
 
     # Tone neutralization (very light MVP)
     safe = re.sub(r"\b(urgent|immediately|act now)\b", "", safe, flags=re.IGNORECASE)
     safe = re.sub(r"\s{2,}", " ", safe).strip()
 
     used_llm = False
-    # LLM rewrite is an optional enhancement; kept as a stub for now.
-    if use_llm and os.getenv("OPENAI_API_KEY"):
-        # TODO: integrate OpenAI call behind feature flag.
-        used_llm = False
+
+    # Optional AI rewrite (never required; falls back to rule-based safe rewrite).
+    if use_llm and _openai_enabled():
+        try:
+            prompt = _rewrite_prompt(text)
+            async with httpx.AsyncClient(timeout=25.0) as client:
+                r = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": _openai_model(),
+                        "messages": [
+                            {"role": "system", "content": "You rewrite emails safely for phishing analysis."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 500,
+                    },
+                )
+
+            if r.status_code == 200:
+                data = r.json()
+                candidate = (
+                    (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+                    or ""
+                ).strip()
+                if candidate:
+                    # Enforce link stripping again no matter what.
+                    candidate = _strip_links(candidate)
+                    safe = candidate
+                    used_llm = True
+        except Exception:
+            # Keep rule-based safe rewrite on failure.
+            used_llm = False
 
     rec.setdefault("analysis", {})["rewrite"] = {"safe_subject": subj, "safe_body": safe, "used_llm": used_llm}
     _save_email(rec)

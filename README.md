@@ -145,6 +145,8 @@ Base: `http://localhost:8000`
 ### Detection + rewrite
 - `POST /emails/{email_id}/detect`
 - `POST /emails/{email_id}/rewrite?use_llm=false|true`
+  - If `use_llm=true` **and** `OPENAI_API_KEY` is set, the API will use OpenAI to produce a higher-quality safe rewrite.
+  - If the LLM call fails or no key is set, it **automatically falls back** to the rule-based rewrite.
 
 ### Open Safely
 - `POST /emails/{email_id}/open-safely`
