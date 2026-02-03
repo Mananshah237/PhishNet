@@ -295,7 +295,10 @@ export default function Home() {
           </label>
 
           <button
-            onClick={() => refreshEmails(false)}
+            onClick={() => {
+              setError(null);
+              refreshEmails(false).catch((e) => setError(String(e)));
+            }}
             style={{
               padding: '9px 12px',
               borderRadius: 12,
