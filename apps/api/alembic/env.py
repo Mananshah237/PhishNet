@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import os
+import sys
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+
+# Ensure /app is on sys.path inside the container so `from app...` works.
+sys.path.insert(0, os.path.abspath(os.getcwd()))
 
 from app.models import Base
 
