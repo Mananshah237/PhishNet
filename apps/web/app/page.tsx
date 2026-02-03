@@ -180,13 +180,32 @@ export default function Home() {
       });
       if (!res.ok) throw new Error(`Open Safely failed: ${res.status}`);
       const data = await res.json();
+
+      // ADS path: API may return just job_id, or job_id + artifacts for convenience.
+      let desktop = data?.artifacts?.desktop;
+      let mobile = data?.artifacts?.mobile;
+      let iocs = data?.artifacts?.iocs;
+
+      if (!desktop || !mobile) {
+        // Fetch artifact list from ADS endpoint.
+        const aRes = await fetch(`${base}/open-safely/artifacts/${data.job_id}`, { cache: 'no-store' });
+        if (aRes.ok) {
+          const aData = await aRes.json();
+          const list = (aData?.artifacts || []) as Array<{ name: string; url: string }>;
+          const find = (n: string) => list.find((x) => x.name === n)?.url;
+          desktop = find('desktop.png');
+          mobile = find('mobile.png');
+          iocs = find('iocs.json');
+        }
+      }
+
       setOpenSafely({
         open: true,
         loading: false,
         jobId: data.job_id,
-        desktopUrl: `${base}${data.artifacts.desktop}`,
-        mobileUrl: `${base}${data.artifacts.mobile}`,
-        iocsUrl: `${base}${data.artifacts.iocs}`
+        desktopUrl: desktop ? `${base}${desktop}` : undefined,
+        mobileUrl: mobile ? `${base}${mobile}` : undefined,
+        iocsUrl: iocs ? `${base}${iocs}` : undefined
       });
     } catch (e: any) {
       setError(String(e));

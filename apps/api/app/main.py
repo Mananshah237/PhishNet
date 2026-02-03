@@ -513,7 +513,17 @@ async def open_safely(email_id: str, req: OpenSafelyRequest, db: Session = Depen
 
     db.commit()
 
-    return {"job_id": job_id}
+    # Backward compatible response for older UI: include artifact URLs.
+    return {
+        "job_id": job_id,
+        "artifacts": {
+            "desktop": f"/open-safely/download/{job_id}?name=desktop.png",
+            "mobile": f"/open-safely/download/{job_id}?name=mobile.png",
+            "iocs": f"/open-safely/download/{job_id}?name=iocs.json",
+            "text": f"/open-safely/download/{job_id}?name=text.txt",
+            "meta": f"/open-safely/download/{job_id}?name=meta.json",
+        },
+    }
 
 
 @app.get("/open-safely/status/{job_id}")
