@@ -13,13 +13,19 @@ services:
   api:
     build:
       context: ./apps/api
+    # 1. Force Docker to read your .env file
+    env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://phishnet:phishnet@db:5432/phishnet
       ARTIFACT_DIR: /artifacts
       RUNNER_BASE_URL: http://runner:7070
-      # Optional AI (set in your environment or .env)
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+
+      # 2. Add Gemini Key (mapped from your .env)
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+
+      # 3. Disable OpenAI explicitly so it uses Gemini
+      OPENAI_API_KEY: ""
+      OPENAI_MODEL: gpt-4o-mini
     ports:
       - "8000:8000"
     volumes:
@@ -35,7 +41,6 @@ services:
       OUT_DIR: /out
     volumes:
       - ./artifacts:/out
-    # no published ports needed; API talks to runner over the docker network
 
   web:
     build:

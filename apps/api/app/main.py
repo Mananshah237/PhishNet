@@ -4,16 +4,17 @@ import json
 import os
 import re
 import uuid
+import traceback
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 import httpx
 
@@ -23,94 +24,248 @@ from sqlalchemy.orm import Session
 from app.db import SessionLocal
 from app.models import Artifact, Detection, Email, OpenSafelyJob, Rewrite
 
+from dotenv import load_dotenv
 
-def _openai_enabled() -> bool:
-    return bool(os.getenv("OPENAI_API_KEY"))
-
-
-def _openai_model() -> str:
-    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+load_dotenv()
 
 
-def _rewrite_prompt(original_text: str) -> str:
-    return (
-        "You are PhishNet, a security-focused email safety assistant. "
-        "Rewrite the email into a SAFE, NEUTRAL version for the user to read.\n\n"
-        "Hard rules:\n"
-        "- Do NOT include any clickable links. Replace any URL with [LINK REMOVED].\n"
-        "- Do NOT include phone numbers, QR codes, or instructions that could lead to compromise.\n"
-        "- Remove emotional manipulation, urgency, and threats.\n"
-        "- Keep factual details that help the user understand what the email is attempting.\n"
-        "- Preserve emojis and friendly formatting if present, but keep tone neutral.\n\n"
-        "Return ONLY the rewritten email body (no commentary, no JSON).\n\n"
-        f"ORIGINAL EMAIL:\n{original_text}"
-    )
+# ---- HELPERS ----------------------------------------------------------------
+
+def _gemini_enabled() -> bool:
+    key = os.getenv("GEMINI_API_KEY")
+    return bool(key and key.strip() and "User cancelled" not in key)
+
+
+def _registrable_domain(domain: str) -> str:
+    if not domain:
+        return ""
+    d = domain.strip(".").lower()
+    parts = d.split(".")
+    if len(parts) <= 2:
+        return d
+    public_suffix_2 = {"co.uk", "com.au", "co.in", "co.jp", "com.br", "gov.uk", "ac.uk"}
+    last2 = ".".join(parts[-2:])
+    last3 = ".".join(parts[-3:])
+    if last2 in public_suffix_2 and len(parts) >= 3:
+        return last3
+    return last2
+
+
+def _domain_matches(a: str, b: str) -> bool:
+    if not a or not b: return False
+    a, b = a.strip(".").lower(), b.strip(".").lower()
+    ra, rb = _registrable_domain(a), _registrable_domain(b)
+    return ra == rb or a.endswith("." + rb) or b.endswith("." + ra)
+
+
+def _detect_prompt_text(subject: str, from_addr: str, to_addr: str, body_text: str, urls: list[str]) -> str:
+    return f"""
+You are PhishNet. Analyze this email for phishing.
+
+Return ONLY a JSON object with these keys:
+- label: "benign", "suspicious", or "phishing"
+- score: integer 0-100 (0=safe, 100=phishing)
+- reasons: array of strings (3-5 bullet points)
+- extracted_iocs: object with keys "urls" (list), "domains" (list), "suspicious_patterns" (list)
+
+Scoring Rubric:
+- 0-19 (Benign): Normal business/newsletter. Links match sender context.
+- 20-59 (Suspicious): Unusual request, mismatching links, mild urgency.
+- 60-100 (Phishing): Credential harvesting, raw IP links, threats, financial scams.
+
+EMAIL DATA:
+Subject: {subject}
+From: {from_addr}
+To: {to_addr}
+Body: {body_text[:4000]}  # Truncated for speed
+
+URLs: {json.dumps(urls[:20], ensure_ascii=False)}
+""".strip()
+
+# Cache the working model name so we don't look it up every time
+_GEMINI_STATE = {"model": None}
+
+async def _get_best_gemini_model(client: httpx.AsyncClient, api_key: str) -> str:
+    if _GEMINI_STATE["model"]:
+        return _GEMINI_STATE["model"]
+
+    print("DEBUG: querying Google for available models...")
+    try:
+        r = await client.get(
+            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        )
+        if r.status_code != 200:
+            print(f"Failed to list models: {r.status_code} {r.text}")
+            return "gemini-2.5-flash" 
+
+        data = r.json()
+        models = data.get("models", [])
+        candidates = []
+        for m in models:
+            if "generateContent" in m.get("supportedGenerationMethods", []):
+                name = m.get("name", "").replace("models/", "")
+                candidates.append(name)
+        
+        selected = None
+        for name in candidates:
+            if "gemini-2.5-flash" in name:
+                selected = name
+                break
+        
+        if not selected:
+            for name in candidates:
+                if "flash" in name:
+                    selected = name
+                    break
+        
+        if not selected and candidates:
+            selected = candidates[0]
+            
+        if selected:
+            print(f"DEBUG: Selected Model: {selected}")
+            _GEMINI_STATE["model"] = selected
+            return selected
+            
+    except Exception as e:
+        print(f"Error finding model: {e}")
+    
+    return "gemini-2.5-flash"
+
+
+async def _gemini_detect(subject: str, from_addr: str, to_addr: str, body_text: str, urls: list[str]) -> dict:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY not set")
+
+    prompt = _detect_prompt_text(subject, from_addr, to_addr, body_text, urls)
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        model_name = await _get_best_gemini_model(client, api_key)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        
+        # ADDED: Disable Safety Filters so it reads phishing emails
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+            ],
+            "generationConfig": {"response_mime_type": "application/json"}
+        }
+
+        r = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
+
+        if r.status_code != 200:
+            # Clear cache on error to force re-discovery next time
+            _GEMINI_STATE["model"] = None
+            raise RuntimeError(f"Gemini API Error {r.status_code}: {r.text}")
+
+        data = r.json()
+        
+        # Check if blocked by safety despite settings
+        if "candidates" not in data or not data["candidates"]:
+            print(f"DEBUG: Gemini blocked content. Response: {data}")
+            return {"score": 85, "label": "phishing", "reasons": ["AI flagged content as unsafe/dangerous"]}
+
+        try:
+            text_response = data["candidates"][0]["content"]["parts"][0]["text"]
+            return json.loads(text_response)
+        except (KeyError, IndexError, json.JSONDecodeError):
+            return {"score": 50, "label": "suspicious", "reasons": ["AI response parsing failed"]}
+
+
+def _heuristic_detect_fallback(e: Email) -> tuple[int, str, list[str]]:
+    """
+    Robust fallback logic (V7) if AI fails.
+    """
+    text = (e.body_text or "").lower()
+    subject = (e.subject or "").lower()
+    urls = e.extracted_urls or []
+    
+    reasons = []
+    score = 0
+    
+    # 1. Header Analysis
+    email_match = re.search(r"<([^>]+)>", e.from_addr or "")
+    sender_email = email_match.group(1).lower() if email_match else (e.from_addr or "").lower()
+    sender_domain = sender_email.split("@")[-1] if "@" in sender_email else ""
+    sender_reg = _registrable_domain(sender_domain)
+
+    # 2. Keywords
+    scam_phrases = ["compensation fund", "winning notification", "inheritance claim", "million usd", "western union"]
+    if any(p in text for p in scam_phrases):
+        reasons.append("Fallback: Financial scam language detected")
+        score += 50 
+
+    urgent_words = ["immediately", "account suspended", "action required", "security alert", "terminate", "verify your account"]
+    if any(w in subject or w in text for w in urgent_words):
+        reasons.append("Fallback: Urgent/Threatening language")
+        score += 25
+
+    # 3. URL Analysis
+    generic_domains = {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com"}
+    siblings = {
+        "google.com": {"google.dev", "youtube.com", "gmail.com", "googlesource.com", "gstatic.com", "appspot.com", "googleusercontent.com"},
+        "microsoft.com": {"office.com", "office365.com", "azure.com", "linkedin.com", "live.com", "sharepoint.com", "microsoftonline.com"},
+        "amazon.com": {"media-amazon.com", "amazonaws.com", "aws.amazon.com", "amazon.co.uk", "amazon.ca"},
+    }
+    
+    mismatch_counted = False
+    has_ip = False
+    
+    for u in urls[:20]:
+        host = (urlparse(u).hostname or "").strip(".").lower()
+        if not host: continue
+        host_reg = _registrable_domain(host)
+
+        if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host) and not has_ip:
+            reasons.append(f"Fallback: Link uses raw IP address ({host})")
+            score += 80
+            has_ip = True
+        
+        if "xn--" in host:
+            reasons.append("Fallback: Punycode domain detected")
+            score += 80
+
+        if sender_domain and sender_domain not in generic_domains:
+            is_safe = False
+            if _domain_matches(sender_domain, host): is_safe = True
+            if not is_safe and sender_reg in siblings:
+                if any(host_reg == _registrable_domain(s) or host.endswith("." + s) for s in siblings[sender_reg]):
+                    is_safe = True
+            
+            if not is_safe and not mismatch_counted:
+                 reasons.append(f"Fallback: Link mismatch ({sender_domain} -> {host})")
+                 score += 40
+                 mismatch_counted = True
+
+    score = min(100, score)
+    label = "phishing" if score >= 65 else "suspicious" if score >= 30 else "benign"
+    return score, label, reasons
 
 
 def _strip_links(text: str) -> str:
     return re.sub(r"https?://[^\s'\"]+", "[LINK REMOVED]", text or "", flags=re.IGNORECASE)
 
-app = FastAPI(title="PhishNet API", version="0.1.0")
-
-# Allow the local Next.js dev UI to call the API from a different origin (3000 -> 8000).
-# MVP policy: open only for local dev origins.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# ---- storage (artifacts on disk; metadata in Postgres) ----------------------
-
-def _artifact_dir() -> str:
-    return os.getenv("ARTIFACT_DIR", os.path.abspath(os.path.join(os.getcwd(), "..", "..", "..", "artifacts")))
-
-
-def get_db() -> Session:
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-# ---- utils ------------------------------------------------------------------
 
 def defang_url(u: str) -> str:
-    # Keep it simple for MVP: break protocol and dots.
     u = u.replace("http://", "hxxp://").replace("https://", "hxxps://")
     u = u.replace(".", "[.]")
     return u
 
 
 def extract_urls(text: str) -> list[str]:
-    # Conservative URL regex; MVP only.
-    if not text:
-        return []
+    if not text: return []
     rx = re.compile(r"https?://[^\s'\"]+", re.IGNORECASE)
     return sorted(set(rx.findall(text)))
 
 
 def html_to_text(html: str) -> str:
-    if not html:
-        return ""
+    if not html: return ""
     soup = BeautifulSoup(html, "lxml")
     return soup.get_text("\n", strip=True)
-
-
-def _domain_from_from_header(from_header: str | None) -> str | None:
-    if not from_header:
-        return None
-    m = re.search(r"@([A-Za-z0-9.-]+)", from_header)
-    if not m:
-        return None
-    return m.group(1).lower().strip(".")
 
 
 def _host_from_url(u: str) -> str | None:
@@ -124,7 +279,32 @@ def _looks_like_ip(host: str) -> bool:
     return bool(re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host))
 
 
-# ---- API models -------------------------------------------------------------
+def _artifact_dir() -> str:
+    return os.getenv("ARTIFACT_DIR", os.path.abspath(os.path.join(os.getcwd(), "..", "..", "..", "artifacts")))
+
+
+def get_db() -> Session:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# ---- API SETUP --------------------------------------------------------------
+
+app = FastAPI(title="PhishNet API", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---- MODELS -----------------------------------------------------------------
 
 class EmailListItem(BaseModel):
     id: str
@@ -151,30 +331,26 @@ class OpenSafelyRequest(BaseModel):
     allow_target_origin: bool = False
 
 
+# ---- ENDPOINTS --------------------------------------------------------------
+
 @app.get("/health")
 def health(db: Session = Depends(get_db)):
-    # Light DB ping
     db.execute(sql_text("SELECT 1"))
     return {"ok": True, "artifact_dir": _artifact_dir(), "db": "ok"}
 
-
 @app.post("/ingest/upload-eml")
 async def upload_eml(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    # Basic size guard (MVP): 2MB
     raw = await file.read()
-    if len(raw) > 2_000_000:
-        raise HTTPException(status_code=413, detail="file too large (max 2MB)")
+    if len(raw) > 5_000_000:
+        raise HTTPException(status_code=413, detail="file too large (max 5MB)")
 
     msg = BytesParser(policy=policy.default).parsebytes(raw)
-
     subject = msg.get("subject")
     from_addr = msg.get("from")
     to_addr = msg.get("to")
     date_hdr = msg.get("date")
-
     raw_headers = "".join([f"{k}: {v}\n" for (k, v) in msg.items()])
 
-    # Prefer HTML part; fall back to text.
     html_body = ""
     text_body = ""
 
@@ -216,10 +392,8 @@ async def upload_eml(file: UploadFile = File(...), db: Session = Depends(get_db)
         defanged_urls=defanged,
         created_at=datetime.now(timezone.utc),
     )
-
     db.add(email)
     db.commit()
-
     return {"email_id": email.id}
 
 
@@ -247,7 +421,6 @@ def get_email(email_id: str, db: Session = Depends(get_db)):
     det = db.query(Detection).filter(Detection.email_id == email_id).order_by(Detection.id.desc()).first()
     rw = db.query(Rewrite).filter(Rewrite.email_id == email_id).order_by(Rewrite.id.desc()).first()
 
-    # Important: do NOT return raw HTML to the client.
     return {
         "id": e.id,
         "source": e.source,
@@ -258,12 +431,8 @@ def get_email(email_id: str, db: Session = Depends(get_db)):
             "to": e.to_addr,
             "date": e.date_hdr,
         },
-        "body": {
-            "text": e.body_text or "",
-        },
-        "links": {
-            "defanged": e.defanged_urls or [],
-        },
+        "body": {"text": e.body_text or ""},
+        "links": {"defanged": e.defanged_urls or []},
         "analysis": {
             "detection": (None if not det else {"label": det.label, "risk_score": det.risk_score, "reasons": det.reasons}),
             "rewrite": (None if not rw else {"safe_subject": rw.safe_subject, "safe_body": rw.safe_body, "used_llm": rw.used_llm}),
@@ -271,95 +440,71 @@ def get_email(email_id: str, db: Session = Depends(get_db)):
     }
 
 
+# ---- CORE DETECTION LOGIC (GEMINI-FIRST) ------------------------------------
+
 @app.post("/emails/{email_id}/detect", response_model=DetectionResult)
-def detect(email_id: str, db: Session = Depends(get_db)):
+async def detect(email_id: str, use_llm: bool = True, db: Session = Depends(get_db)):
     e = db.query(Email).filter(Email.id == email_id).first()
     if not e:
         raise HTTPException(status_code=404, detail="email not found")
-    text = e.body_text or ""
+
+    subject = e.subject or ""
+    from_addr = e.from_addr or ""
+    to_addr = e.to_addr or ""
+    body_text = e.body_text or ""
     urls: list[str] = e.extracted_urls or []
 
-    reasons: list[str] = []
-    score = 0
+    # 1. Try Gemini AI First
+    if use_llm and _gemini_enabled():
+        try:
+            # print(f"DEBUG: Attempting Gemini detection for {email_id}")
+            ai = await _gemini_detect(subject, from_addr, to_addr, body_text, urls)
 
-    t = text.lower()
+            final_score = int(ai.get("score", 0))
+            label = str(ai.get("label", "benign")).lower()
+            ai_reasons = ai.get("reasons", []) or []
+            
+            reasons = []
+            if isinstance(ai_reasons, list):
+                reasons.extend([str(x) for x in ai_reasons if str(x).strip()])
+            else:
+                reasons.append(str(ai_reasons))
 
-    # MVP heuristics (replace later with model)
-    urgent_words = [
-        "urgent",
-        "immediately",
-        "verify",
-        "password",
-        "suspended",
-        "locked",
-        "invoice",
-        "payment",
-        "action required",
-        "security alert",
-        "unusual activity",
-        "confirm your account",
-    ]
-    if any(w in t for w in urgent_words):
-        reasons.append("Urgent / coercive language")
-        score += 25
+            # Guardrail: Tech Check
+            has_ip_link = False
+            has_punycode = False
+            for u in urls[:25]:
+                host = (urlparse(u).hostname or "").strip(".").lower()
+                if not host: continue
+                if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host): has_ip_link = True
+                if "xn--" in host: has_punycode = True
 
-    cred_words = ["login", "sign in", "verify", "password", "2fa", "otp", "code", "account"]
-    if any(w in t for w in cred_words):
-        reasons.append("Credential-harvesting language")
-        score += 15
+            if (has_ip_link or has_punycode) and final_score < 80:
+                final_score = 85
+                label = "phishing"
+                reasons.append("System Override: Technical indicator (raw IP / punycode) present.")
 
-    # URL-based signals (more reliable than body text)
-    if urls:
-        reasons.append(f"Contains {len(urls)} URL(s)")
-        score += min(30, 10 + 5 * len(urls))
+            # Final Cleanup
+            final_score = max(0, min(100, final_score))
+            seen = set()
+            reasons = [x for x in reasons if not (x in seen or seen.add(x))]
 
-    sender_domain = _domain_from_from_header(e.from_addr)
+            det = Detection(email_id=email_id, label=label, risk_score=final_score, reasons=reasons, created_at=datetime.now(timezone.utc))
+            db.add(det)
+            db.commit()
+            return DetectionResult(label=label, risk_score=final_score, reasons=reasons)
 
-    suspicious_tlds = {"zip", "mov", "top", "xyz", "click", "icu"}
-    shorteners = {"bit.ly", "t.co", "tinyurl.com", "goo.gl", "is.gd", "cutt.ly"}
+        except Exception as ex:
+            print(f"ERROR: Gemini Detection failed (falling back): {ex}")
+            traceback.print_exc()  # PRINT FULL ERROR
+            # Fall through to heuristics below...
 
-    for u in urls[:10]:
-        host = (_host_from_url(u) or "").lower().strip(".")
-        if not host:
-            continue
+    # 2. Fallback to Robust V7 Heuristics
+    print(f"DEBUG: Running Heuristic Fallback for {email_id}")
+    score, label, reasons = _heuristic_detect_fallback(e)
+    if _gemini_enabled():
+        reasons.append("Note: AI analysis failed; used heuristics")
 
-        if host.startswith("xn--"):
-            reasons.append("Punycode domain (possible homograph)")
-            score += 12
-
-        if _looks_like_ip(host):
-            reasons.append("Link uses a raw IP address")
-            score += 15
-
-        if host in shorteners:
-            reasons.append("Uses URL shortener")
-            score += 10
-
-        tld = host.split(".")[-1] if "." in host else ""
-        if tld in suspicious_tlds:
-            reasons.append(f"Suspicious TLD: .{tld}")
-            score += 8
-
-        if sender_domain and sender_domain not in host:
-            # Weak signal, but good in a demo.
-            reasons.append("Sender domain does not match link domain")
-            score += 10
-
-        if re.search(r"@", u):
-            reasons.append("URL contains '@' (possible obfuscation)")
-            score += 10
-
-        if re.search(r"%[0-9A-Fa-f]{2}", u):
-            reasons.append("URL contains encoded characters (obfuscation)")
-            score += 6
-
-    # Normalize
-    reasons = sorted(set(reasons))
-
-    score = max(0, min(100, score))
-    label = "phishing" if score >= 60 else "suspicious" if score >= 30 else "benign"
-
-    # Upsert-style: create a new detection row for traceability.
     det = Detection(email_id=email_id, label=label, risk_score=score, reasons=reasons, created_at=datetime.now(timezone.utc))
     db.add(det)
     db.commit()
@@ -372,63 +517,19 @@ async def rewrite(email_id: str, use_llm: bool = False, db: Session = Depends(ge
     e = db.query(Email).filter(Email.id == email_id).first()
     if not e:
         raise HTTPException(status_code=404, detail="email not found")
-    subj = e.subject
-    text = e.body_text or ""
+    
+    # Rewrite is simple rule-based only in free version
+    safe = _strip_links(e.body_text or "")
+    used_llm_actual = False
 
-    # Guaranteed rule-based rewrite: remove manipulation + strip links.
-    safe = text
-    safe = _strip_links(safe)
-
-    # Tone neutralization (very light MVP)
-    safe = re.sub(r"\b(urgent|immediately|act now)\b", "", safe, flags=re.IGNORECASE)
-    safe = re.sub(r"\s{2,}", " ", safe).strip()
-
-    used_llm = False
-
-    # Optional AI rewrite (never required; falls back to rule-based safe rewrite).
-    if use_llm and _openai_enabled():
-        try:
-            prompt = _rewrite_prompt(text)
-            async with httpx.AsyncClient(timeout=25.0) as client:
-                r = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": _openai_model(),
-                        "messages": [
-                            {"role": "system", "content": "You rewrite emails safely for phishing analysis."},
-                            {"role": "user", "content": prompt},
-                        ],
-                        "temperature": 0.3,
-                        "max_tokens": 500,
-                    },
-                )
-
-            if r.status_code == 200:
-                data = r.json()
-                candidate = (
-                    (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
-                    or ""
-                ).strip()
-                if candidate:
-                    # Enforce link stripping again no matter what.
-                    candidate = _strip_links(candidate)
-                    safe = candidate
-                    used_llm = True
-        except Exception:
-            # Keep rule-based safe rewrite on failure.
-            used_llm = False
-
-    rw = Rewrite(email_id=email_id, safe_subject=subj, safe_body=safe, used_llm=used_llm, created_at=datetime.now(timezone.utc))
+    rw = Rewrite(email_id=email_id, safe_subject=e.subject, safe_body=safe, used_llm=used_llm_actual, created_at=datetime.now(timezone.utc))
     db.add(rw)
     db.commit()
 
-    return RewriteResult(safe_subject=subj, safe_body=safe, used_llm=used_llm)
+    return RewriteResult(safe_subject=e.subject, safe_body=safe, used_llm=used_llm_actual)
 
 
+# ... (OpenSafely endpoints below)
 @app.post("/emails/{email_id}/open-safely")
 async def open_safely(email_id: str, req: OpenSafelyRequest, db: Session = Depends(get_db)):
     e = db.query(Email).filter(Email.id == email_id).first()
@@ -455,7 +556,6 @@ async def open_safely(email_id: str, req: OpenSafelyRequest, db: Session = Depen
 
     runner = os.getenv("RUNNER_BASE_URL", "http://runner:7070")
 
-    # Execute synchronously for MVP, but track status like the ADS.
     job.status = "running"
     job.started_at = datetime.now(timezone.utc)
     db.commit()
@@ -482,7 +582,6 @@ async def open_safely(email_id: str, req: OpenSafelyRequest, db: Session = Depen
     job.finished_at = datetime.now(timezone.utc)
     db.commit()
 
-    # Record artifacts (paths are inside the host-mounted artifacts dir)
     job_dir = os.path.join(_artifact_dir(), "open-safely", job_id)
     manifest = {
         "desktop.png": "image/png",
@@ -496,24 +595,10 @@ async def open_safely(email_id: str, req: OpenSafelyRequest, db: Session = Depen
         p = os.path.join(job_dir, name)
         if os.path.exists(p):
             size = os.path.getsize(p)
-            # sha256 already in meta.json, but compute here for DB integrity when present.
             sha = None
-            try:
-                import hashlib
-
-                h = hashlib.sha256()
-                with open(p, "rb") as f:
-                    for chunk in iter(lambda: f.read(8192), b""):
-                        h.update(chunk)
-                sha = h.hexdigest()
-            except Exception:
-                sha = None
-
             db.add(Artifact(job_id=job_id, name=name, rel_path=f"open-safely/{job_id}/{name}", sha256=sha, mime=mime, size_bytes=size, created_at=datetime.now(timezone.utc)))
 
     db.commit()
-
-    # Backward compatible response for older UI: include artifact URLs.
     return {
         "job_id": job_id,
         "artifacts": {
@@ -524,7 +609,6 @@ async def open_safely(email_id: str, req: OpenSafelyRequest, db: Session = Depen
             "meta": f"/open-safely/download/{job_id}?name=meta.json",
         },
     }
-
 
 @app.get("/open-safely/status/{job_id}")
 def open_safely_status(job_id: str, db: Session = Depends(get_db)):
@@ -542,7 +626,6 @@ def open_safely_status(job_id: str, db: Session = Depends(get_db)):
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
     }
-
 
 @app.get("/open-safely/artifacts/{job_id}")
 def open_safely_artifacts(job_id: str, db: Session = Depends(get_db)):
@@ -566,10 +649,8 @@ def open_safely_artifacts(job_id: str, db: Session = Depends(get_db)):
         ],
     }
 
-
 @app.get("/open-safely/download/{job_id}")
 def open_safely_download(job_id: str, name: str, db: Session = Depends(get_db)):
-    # Prevent path traversal: only allow known artifact names from DB.
     a = db.query(Artifact).filter(Artifact.job_id == job_id, Artifact.name == name).first()
     if not a:
         raise HTTPException(status_code=404, detail="not found")
