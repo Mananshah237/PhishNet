@@ -1,4 +1,4 @@
-```
+
 # 🛡️ PhishNet: AI-Powered Email Security Sandbox
 
 **PhishNet** is a secure, localized environment for analyzing suspicious emails. It combines **Google Gemini AI** with robust **heuristic analysis** to detect phishing attempts, while providing a sandboxed "Safe Preview" to view malicious content without risk.
@@ -13,7 +13,7 @@
 * **🔍 Deep Link Analysis:** Detects deceptive links (e.g., `paypal-support.com` vs `paypal.com`) using intelligent domain root matching.
 * **🔐 Privacy Focused:** Self-hosted via Docker. Your emails stay on your machine (except for the text sent to Gemini API for analysis).
 
----
+
 
 ## 🏗️ Architecture
 
