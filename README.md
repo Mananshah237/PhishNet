@@ -1,188 +1,144 @@
-# PhishNet 🛡️🎣
 
-**PhishNet** is a standalone phishing-analysis dashboard designed to safely analyze suspicious emails without exposing the client to danger.
+# 🛡️ PhishNet: AI-Powered Email Security Sandbox
 
-- **Ingest:** Upload `.eml` files (Gmail read-only integration planned).
-- **Detect:** Assigns a **risk score (0–100)** with human-readable reasons.
-- **Rewrite:** Produces a **safe version** of the email (rule-based default; LLM optional).
-- **Open Safely:** Renders suspicious links in an isolated runner, delivering only screenshots to the user.
+**PhishNet** is a secure, localized environment for analyzing suspicious emails. It combines **Google Gemini AI** with robust **heuristic analysis** to detect phishing attempts, while providing a sandboxed "Safe Preview" to view malicious content without risk.
 
-> **Security Promise (MVP):** The client never receives raw dangerous HTML and never clicks live links.
+![PhishNet Screenshot](https://via.placeholder.com/800x400?text=PhishNet+Dashboard+Preview)
 
----
+## 🚀 Key Features
 
-## 🚀 What you get in the MVP
+* **🧠 AI-First Detection Engine:** Uses **Google Gemini 2.5 Flash** (with auto-discovery) to analyze email context, intent, and coercion.
+* **🛡️ Robust Fallback Heuristics (V7):** A "Unbreakable" backup layer that catches technical threats (Raw IPs, Punycode, Link Mismatches) even if AI fails.
+* **🧪 Open Safely Mode:** Renders emails in a headless browser sandbox (Runner) to capture screenshots and extract links without exposing your local machine.
+* **🔍 Deep Link Analysis:** Detects deceptive links (e.g., `paypal-support.com` vs `paypal.com`) using intelligent domain root matching.
+* **🔐 Privacy Focused:** Self-hosted via Docker. Your emails stay on your machine (except for the text sent to Gemini API for analysis).
 
-* **Web UI (Next.js):** Responsive email list + dual-panel viewer.
-* **API (FastAPI):** Handles ingestion, detection, rewriting, and orchestration.
-* **Runner (Playwright):** Isolated sandbox that renders URLs and captures **desktop + mobile screenshots**.
-* **Persistence:** Artifacts stored as JSON in `artifacts/` (Postgres container included for future schema migration).
 
----
 
 ## 🏗️ Architecture
 
-```
-graph LR
-    User[Browser UI] -- HTTP --> API[FastAPI Backend]
-    API -- HTTP --> Runner[Playwright Runner]
-    API -- Read/Write --> Disk[(Artifacts/JSON)]
-    Runner -- Read/Write --> Disk
+PhishNet runs as a multi-container Docker application:
 
 ```
+graph TD
+    User[User / Browser] -->|Uploads .eml| Web[Next.js Frontend]
+    Web -->|API Calls| API[FastAPI Backend]
+    API -->|Store Metadata| DB[(PostgreSQL)]
+    API -->|Analyze Text| Gemini[Google Gemini API]
+    API -->|Render & Screenshot| Runner[Headless Browser Service]
+    Runner -->|Save Artifacts| Volume[Local Storage]
 
-* **apps/web**: Next.js UI
-* **apps/api**: FastAPI backend
-* **apps/runner**: Playwright sandbox renderer (HTTP service)
-* **artifacts/**: Local artifact vault (emails, screenshots, IOCs)
+```
 
 ---
 
-## 🔒 Security Policies (MVP)
+## 🛠️ Prerequisites
 
-1. **No raw dangerous HTML** is ever sent to the client.
-2. **All links are defanged** and non-clickable in the UI.
-3. **Runner is default-deny** for outbound network access.
+* **Docker Desktop** (Running and updated)
+* **Google Gemini API Key** (Free tier is sufficient)
+* [Get a free key here](https://aistudio.google.com/app/apikey)
 
-### "Open Safely" Network Policy
 
-When a user requests to view a suspicious link, two modes are available:
-
-| Mode | Behavior | Use Case |
-| --- | --- | --- |
-| **Default (Safest)** | **Deny All.** No network traffic allowed. | safest analysis; screenshots may be blank. |
-| **Open Safely ✨** | **Target Origin Only.** Allows strictly the destination domain. Blocks ads, trackers, CDNs, and fonts. | Visual verification of the phishing page. |
 
 ---
 
-## ⚡ Quickstart (Windows + Docker Desktop)
-
-### Prerequisites
-
-* Docker Desktop (Linux containers mode)
-* Git
+## ⚡ Quick Start Guide
 
 ### 1. Clone the Repository
 
-```powershell
-git clone [https://github.com/Mananshah237/PhishNet.git](https://github.com/Mananshah237/PhishNet.git)
-cd PhishNet
+```bash
+git clone [https://github.com/yourusername/phishnet.git](https://github.com/yourusername/phishnet.git)
+cd phishnet
 
 ```
 
-### 2. Run with Docker Compose
+### 2. Configure Environment
 
-*Note: On Windows, `docker` is sometimes not in the PATH for new terminals. Use this exact PowerShell snippet to run the project:*
+Create a `.env` file in the root directory. You can copy the example below:
 
-```powershell
-# 1. Set the correct path to the executable
-$docker = "C:\Program Files\Docker\Docker\resources\bin\docker.exe"
+```ini
+# .env file
 
-# 2. Add to PATH for the current session (fixes credential errors)
-$env:Path = "C:\Program Files\Docker\Docker\resources\bin;" + $env:Path
+# --- Database (Default) ---
+POSTGRES_USER=phishnet
+POSTGRES_PASSWORD=phishnet
+POSTGRES_DB=phishnet
 
-# 3. Verify Docker is reachable
-& $docker --version
+# --- AI Configuration ---
+# Get Key: [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
+GEMINI_API_KEY=AIzaSyDxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
-# 4. Build and Run
-& $docker compose build
-& $docker compose up -d
-
-```
-
-### 3. Open in Browser
-
-* **Web UI:** [http://localhost:3000](https://www.google.com/search?q=http://localhost:3000)
-* **API Health:** [http://localhost:8000/health](https://www.google.com/search?q=http://localhost:8000/health)
-
-To stop the services:
-
-```powershell
-& $docker compose down
-
-```
-
----
-
-## ✨ Optional AI (OpenAI)
-
-PhishNet includes an optional LLM-powered rewrite engine.
-
-* **Enabled:** Produces higher-quality, natural-sounding safe summaries.
-* **Disabled/Failed:** Automatically falls back to the robust rule-based rewrite.
-
-**How to enable:**
-
-1. Create a `.env` file in the root directory:
-```env
-OPENAI_API_KEY=sk-...
+# (Optional) OpenAI Support - Leave empty to use Gemini
+OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 
 ```
 
+### 3. Launch with Docker
 
-2. Rebuild the API container:
+Run the following command to build and start the system.
+*Note: The first run takes a few minutes to download the AI and Browser images.*
+
 ```powershell
-& $docker compose up -d --build api
+docker compose up -d --build
 
 ```
 
+### 4. Access the App
 
-3. In the UI, toggle **"Use LLM rewrite (optional) ✨"** before uploading.
-
----
-
-## 📖 API Reference (MVP)
-
-**Base URL:** `http://localhost:8000`
-
-### Core Endpoints
-
-* `POST /ingest/upload-eml` - Upload `.eml` file.
-* `GET /emails/{email_id}` - Get sanitized email text (no raw HTML).
-* `POST /emails/{email_id}/detect` - Run phishing detection logic.
-* `POST /emails/{email_id}/rewrite` - Generate safe version (`?use_llm=true` optional).
-
-### Open Safely Endpoints
-
-* `POST /emails/{email_id}/open-safely`
-* Body: `{ "link_index": 0, "allow_target_origin": false }`
-
-
-* `GET /open-safely/{job_id}/desktop.png` - View result.
+* **Frontend:** [http://localhost:3000](https://www.google.com/search?q=http://localhost:3000)
+* **API Docs:** [http://localhost:8000/docs](https://www.google.com/search?q=http://localhost:8000/docs)
 
 ---
 
-## 🛠️ Troubleshooting
+## 🖥️ Usage
 
-**"Failed to fetch" in UI**
+1. **Upload:** Drag and drop an `.eml` file into the dashboard.
+2. **Analysis:** The system runs two parallel checks:
+* **AI:** Asks Gemini "Is this phishing?" (Contextual analysis).
+* **Heuristics:** Checks for hard indicators (IP links, mismatched domains).
 
-* Ensure the API container is running.
-* Check logs: `& $docker compose logs --tail 200 api web`
 
-**Open Safely screenshots are blank**
-
-* This is expected in **Default** mode (network denied). Use **Open Safely ✨** to allow the target page to load.
-
-**Docker command not found**
-
-* Ensure you are using the variable `& $docker` defined in the Quickstart, or add Docker to your system PATH permanently.
+3. **Result:** You get a Score (0-100) and a Verdict (Safe, Suspicious, Phishing).
+4. **Open Safely:** Click "Open Safely" to render the email in a remote browser and see what it looks like without clicking anything locally.
 
 ---
 
-## 🗺️ Roadmap
+## 🔧 Troubleshooting
 
-* [ ] Gmail OAuth read-only integration
-* [ ] Proper DB persistence (Postgres schema + migrations)
-* [ ] Background job queue (Redis + RQ/Celery)
-* [ ] Advanced IOC extraction
-* [ ] Attachment metadata analysis
+### "AI analysis unavailable; using heuristics"
+
+* **Cause:** The container can't see your API key, or the key is invalid.
+* **Fix:**
+1. Check your `.env` file.
+2. Run: `docker compose exec api env` to confirm the key is loaded.
+3. If not, force recreate: `docker compose up -d --force-recreate api`
+
+
+
+### "NetworkError" in Frontend
+
+* **Cause:** The API container crashed or isn't ready.
+* **Fix:** Check logs with `docker compose logs -f api`. If it's a syntax error, rebuild with `docker compose up -d --build api`.
+
+### Gemini 404 / Model Not Found
+
+* **Fix:** The system now has **Auto-Discovery**. It will automatically try `gemini-2.5-flash`, `1.5-flash`, and `1.5-pro` until it finds one your key supports. Just restart the API container to re-trigger discovery.
 
 ---
 
-## License
+## 📂 Project Structure
 
-TBD
+* **`apps/api`**: Python FastAPI backend (Logic, DB, AI integration).
+* **`apps/web`**: Next.js Frontend (UI, Uploads).
+* **`apps/runner`**: Node.js/Puppeteer service for safe rendering.
+* **`artifacts/`**: Stores screenshots and analyzed email data locally.
+
+---
+
+## 📜 License
+
+MIT License. Use responsibly for educational and defensive security purposes.
 
 ```
 
