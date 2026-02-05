@@ -31,149 +31,11 @@ load_dotenv()
 
 # ---- HELPERS ----------------------------------------------------------------
 
-def _gemini_enabled() -> bool:
-    key = os.getenv("GEMINI_API_KEY")
-    return bool(key and key.strip() and "User cancelled" not in key)
+from app.ai_engine import detect_email_with_local_ai
 
-
-def _registrable_domain(domain: str) -> str:
-    if not domain:
-        return ""
-    d = domain.strip(".").lower()
-    parts = d.split(".")
-    if len(parts) <= 2:
-        return d
-    public_suffix_2 = {"co.uk", "com.au", "co.in", "co.jp", "com.br", "gov.uk", "ac.uk"}
-    last2 = ".".join(parts[-2:])
-    last3 = ".".join(parts[-3:])
-    if last2 in public_suffix_2 and len(parts) >= 3:
-        return last3
-    return last2
-
-
-def _domain_matches(a: str, b: str) -> bool:
-    if not a or not b: return False
-    a, b = a.strip(".").lower(), b.strip(".").lower()
-    ra, rb = _registrable_domain(a), _registrable_domain(b)
-    return ra == rb or a.endswith("." + rb) or b.endswith("." + ra)
-
-
-def _detect_prompt_text(subject: str, from_addr: str, to_addr: str, body_text: str, urls: list[str]) -> str:
-    return f"""
-You are PhishNet. Analyze this email for phishing.
-
-Return ONLY a JSON object with these keys:
-- label: "benign", "suspicious", or "phishing"
-- score: integer 0-100 (0=safe, 100=phishing)
-- reasons: array of strings (3-5 bullet points)
-- extracted_iocs: object with keys "urls" (list), "domains" (list), "suspicious_patterns" (list)
-
-Scoring Rubric:
-- 0-19 (Benign): Normal business/newsletter. Links match sender context.
-- 20-59 (Suspicious): Unusual request, mismatching links, mild urgency.
-- 60-100 (Phishing): Credential harvesting, raw IP links, threats, financial scams.
-
-EMAIL DATA:
-Subject: {subject}
-From: {from_addr}
-To: {to_addr}
-Body: {body_text[:4000]}  # Truncated for speed
-
-URLs: {json.dumps(urls[:20], ensure_ascii=False)}
-""".strip()
-
-# Cache the working model name so we don't look it up every time
-_GEMINI_STATE = {"model": None}
-
-async def _get_best_gemini_model(client: httpx.AsyncClient, api_key: str) -> str:
-    if _GEMINI_STATE["model"]:
-        return _GEMINI_STATE["model"]
-
-    print("DEBUG: querying Google for available models...")
-    try:
-        r = await client.get(
-            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-        )
-        if r.status_code != 200:
-            print(f"Failed to list models: {r.status_code} {r.text}")
-            return "gemini-2.5-flash" 
-
-        data = r.json()
-        models = data.get("models", [])
-        candidates = []
-        for m in models:
-            if "generateContent" in m.get("supportedGenerationMethods", []):
-                name = m.get("name", "").replace("models/", "")
-                candidates.append(name)
-        
-        selected = None
-        for name in candidates:
-            if "gemini-2.5-flash" in name:
-                selected = name
-                break
-        
-        if not selected:
-            for name in candidates:
-                if "flash" in name:
-                    selected = name
-                    break
-        
-        if not selected and candidates:
-            selected = candidates[0]
-            
-        if selected:
-            print(f"DEBUG: Selected Model: {selected}")
-            _GEMINI_STATE["model"] = selected
-            return selected
-            
-    except Exception as e:
-        print(f"Error finding model: {e}")
-    
-    return "gemini-2.5-flash"
-
-
-async def _gemini_detect(subject: str, from_addr: str, to_addr: str, body_text: str, urls: list[str]) -> dict:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY not set")
-
-    prompt = _detect_prompt_text(subject, from_addr, to_addr, body_text, urls)
-    
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        model_name = await _get_best_gemini_model(client, api_key)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-        
-        # ADDED: Disable Safety Filters so it reads phishing emails
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-            ],
-            "generationConfig": {"response_mime_type": "application/json"}
-        }
-
-        r = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
-
-        if r.status_code != 200:
-            # Clear cache on error to force re-discovery next time
-            _GEMINI_STATE["model"] = None
-            raise RuntimeError(f"Gemini API Error {r.status_code}: {r.text}")
-
-        data = r.json()
-        
-        # Check if blocked by safety despite settings
-        if "candidates" not in data or not data["candidates"]:
-            print(f"DEBUG: Gemini blocked content. Response: {data}")
-            return {"score": 85, "label": "phishing", "reasons": ["AI flagged content as unsafe/dangerous"]}
-
-        try:
-            text_response = data["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(text_response)
-        except (KeyError, IndexError, json.JSONDecodeError):
-            return {"score": 50, "label": "suspicious", "reasons": ["AI response parsing failed"]}
+def _ai_enabled() -> bool:
+    # Always enabled if we have the service, but we can check if the URL is set
+    return bool(os.getenv("OLLAMA_BASE_URL"))
 
 
 def _heuristic_detect_fallback(e: Email) -> tuple[int, str, list[str]]:
@@ -255,6 +117,26 @@ def defang_url(u: str) -> str:
     u = u.replace(".", "[.]")
     return u
 
+
+def _registrable_domain(domain: str) -> str:
+    if not domain:
+        return ""
+    d = domain.strip(".").lower()
+    parts = d.split(".")
+    if len(parts) <= 2:
+        return d
+    public_suffix_2 = {"co.uk", "com.au", "co.in", "co.jp", "com.br", "gov.uk", "ac.uk"}
+    last2 = ".".join(parts[-2:])
+    last3 = ".".join(parts[-3:])
+    if last2 in public_suffix_2 and len(parts) >= 3:
+        return last3
+    return last2
+
+def _domain_matches(a: str, b: str) -> bool:
+    if not a or not b: return False
+    a, b = a.strip(".").lower(), b.strip(".").lower()
+    ra, rb = _registrable_domain(a), _registrable_domain(b)
+    return ra == rb or a.endswith("." + rb) or b.endswith("." + ra)
 
 def extract_urls(text: str) -> list[str]:
     if not text: return []
@@ -440,8 +322,6 @@ def get_email(email_id: str, db: Session = Depends(get_db)):
     }
 
 
-# ---- CORE DETECTION LOGIC (GEMINI-FIRST) ------------------------------------
-
 @app.post("/emails/{email_id}/detect", response_model=DetectionResult)
 async def detect(email_id: str, use_llm: bool = True, db: Session = Depends(get_db)):
     e = db.query(Email).filter(Email.id == email_id).first()
@@ -454,11 +334,11 @@ async def detect(email_id: str, use_llm: bool = True, db: Session = Depends(get_
     body_text = e.body_text or ""
     urls: list[str] = e.extracted_urls or []
 
-    # 1. Try Gemini AI First
-    if use_llm and _gemini_enabled():
+    # 1. Try Local AI First
+    if use_llm and _ai_enabled():
         try:
-            # print(f"DEBUG: Attempting Gemini detection for {email_id}")
-            ai = await _gemini_detect(subject, from_addr, to_addr, body_text, urls)
+            print(f"DEBUG: Attempting Local AI detection for {email_id}")
+            ai = detect_email_with_local_ai(subject, from_addr, body_text, urls)
 
             final_score = int(ai.get("score", 0))
             label = str(ai.get("label", "benign")).lower()
@@ -486,6 +366,13 @@ async def detect(email_id: str, use_llm: bool = True, db: Session = Depends(get_
 
             # Final Cleanup
             final_score = max(0, min(100, final_score))
+            
+            # CONSISTENCY CHECK: Fix Llama 3.2 1B contradictions (e.g. "benign" but score 100)
+            if label == "benign" and final_score > 40:
+                final_score = 10
+            elif label == "phishing" and final_score < 60:
+                final_score = 80
+                
             seen = set()
             reasons = [x for x in reasons if not (x in seen or seen.add(x))]
 
@@ -495,14 +382,14 @@ async def detect(email_id: str, use_llm: bool = True, db: Session = Depends(get_
             return DetectionResult(label=label, risk_score=final_score, reasons=reasons)
 
         except Exception as ex:
-            print(f"ERROR: Gemini Detection failed (falling back): {ex}")
+            print(f"ERROR: Local AI Detection failed (falling back): {ex}")
             traceback.print_exc()  # PRINT FULL ERROR
             # Fall through to heuristics below...
 
     # 2. Fallback to Robust V7 Heuristics
     print(f"DEBUG: Running Heuristic Fallback for {email_id}")
     score, label, reasons = _heuristic_detect_fallback(e)
-    if _gemini_enabled():
+    if _ai_enabled():
         reasons.append("Note: AI analysis failed; used heuristics")
 
     det = Detection(email_id=email_id, label=label, risk_score=score, reasons=reasons, created_at=datetime.now(timezone.utc))

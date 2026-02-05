@@ -10,7 +10,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
+
 
 revision: str = "20260203_0001"
 down_revision: Union[str, None] = None
@@ -30,8 +30,8 @@ def upgrade() -> None:
         sa.Column("raw_headers", sa.Text(), nullable=True),
         sa.Column("body_text", sa.Text(), nullable=False),
         sa.Column("body_html", sa.Text(), nullable=False),
-        sa.Column("extracted_urls", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("defanged_urls", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("extracted_urls", sa.JSON(), nullable=False),
+        sa.Column("defanged_urls", sa.JSON(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
 
@@ -41,7 +41,7 @@ def upgrade() -> None:
         sa.Column("email_id", sa.String(), sa.ForeignKey("emails.id", ondelete="CASCADE"), nullable=False),
         sa.Column("label", sa.String(), nullable=False),
         sa.Column("risk_score", sa.Integer(), nullable=False),
-        sa.Column("reasons", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("reasons", sa.JSON(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index("ix_detections_email_id", "detections", ["email_id"]) 

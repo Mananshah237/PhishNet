@@ -3,10 +3,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-
 
 class Base(DeclarativeBase):
     pass
@@ -32,8 +30,8 @@ class Email(Base):
     body_text: Mapped[str] = mapped_column(Text, default="")
     body_html: Mapped[str] = mapped_column(Text, default="")
 
-    extracted_urls: Mapped[list] = mapped_column(JSONB, default=list)
-    defanged_urls: Mapped[list] = mapped_column(JSONB, default=list)
+    extracted_urls: Mapped[list] = mapped_column(JSON, default=list)
+    defanged_urls: Mapped[list] = mapped_column(JSON, default=list)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
@@ -50,7 +48,7 @@ class Detection(Base):
 
     label: Mapped[str] = mapped_column(String)
     risk_score: Mapped[int] = mapped_column(Integer)
-    reasons: Mapped[list] = mapped_column(JSONB, default=list)
+    reasons: Mapped[list] = mapped_column(JSON, default=list)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 

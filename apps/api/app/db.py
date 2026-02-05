@@ -7,13 +7,17 @@ from sqlalchemy.orm import sessionmaker
 
 
 def database_url() -> str:
-    # docker-compose supplies DATABASE_URL
     url = os.getenv("DATABASE_URL")
     if not url:
-        # Safe local default (mainly for non-docker dev)
-        url = "postgresql+psycopg://phishnet:phishnet@localhost:5432/phishnet"
+        # Fallback for local testing without docker
+        url = "sqlite:///./phishnet.db"
     return url
 
 
-engine = create_engine(database_url(), pool_pre_ping=True)
+# SQLite specific: check_same_thread=False is required for FastAPI
+engine = create_engine(
+    database_url(), 
+    connect_args={"check_same_thread": False},
+    pool_pre_ping=True
+)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
