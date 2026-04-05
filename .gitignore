@@ -16,6 +16,9 @@ apps/web/out/
 .env
 .env.*
 
+# SQLite (local / Docker volume; avoid merge conflicts on binary DB)
+apps/api/data/phishnet.db
+
 # claude code
 .claude/
 

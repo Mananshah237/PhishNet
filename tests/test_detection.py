@@ -9,9 +9,16 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "apps", "api"))
 
 from app.main import (
-    _heuristic_detect_fallback, _registrable_domain, _is_third_party_domain,
-    _domain_entropy, _has_suspicious_tld, _is_free_hosting, _count_subdomains,
-    _url_has_credential_path, _brand_in_url_subdomain,
+    _heuristic_detect_fallback,
+    _adjust_combined_score_for_mail_auth,
+    _registrable_domain,
+    _is_third_party_domain,
+    _domain_entropy,
+    _has_suspicious_tld,
+    _is_free_hosting,
+    _count_subdomains,
+    _url_has_credential_path,
+    _brand_in_url_subdomain,
 )
 
 
@@ -277,6 +284,38 @@ def test_legit_marketing_with_tracking():
     assert s < 20
 
 
+def test_legit_devpost_style_customer_io_newsletter():
+    """ESP click tracking + sponsor subdomain on sender domain (false positive guard)."""
+    s, l, r = _run("Devpost-style newsletter", make_email(
+        subject="February is for shipping",
+        from_addr="Devpost <support@devpost.com>",
+        body_text="Hey Builders, new hackathons and tools this week. Follow us on Instagram!",
+        urls=[
+            "https://e.customeriomail.com/e/c/eyJlbWFpbF9pZCI6IjEifQ/abc123",
+            "https://e.customeriomail.com/e/c/eyJlbWFpbF9pZCI6IjIifQ/def456",
+            "https://amazon-nova.devpost.com/?utm_source=newsletter",
+            "https://instagram.com/devposthq",
+            "https://devpost.com/unsubscribe",
+        ],
+    ))
+    assert l == "benign", f"Expected benign, got {l} (score={s})"
+    assert s < 30
+
+
+def test_adjust_score_when_spf_dkim_dmarc_pass():
+    headers = (
+        "Authentication-Results: spf=pass smtp.mailfrom=example.com; "
+        "dkim=pass header.d=example.com; dmarc=pass\n"
+    )
+    s, lbl, notes = _adjust_combined_score_for_mail_auth(99, "phishing", headers)
+    assert s == 44
+    assert lbl == "suspicious"
+    assert notes and "adjusted" in notes[0].lower()
+
+    s2, lbl2, n2 = _adjust_combined_score_for_mail_auth(99, "phishing", None)
+    assert s2 == 99 and lbl2 == "phishing" and n2 == []
+
+
 def test_legit_plain_text_no_urls():
     s, l, r = _run("Legit plain text", make_email(
         subject="Meeting tomorrow at 3pm",
@@ -470,6 +509,8 @@ def test_third_party_detection():
     assert _is_third_party_domain("doubleclick.net") is True
     assert _is_third_party_domain("hubspot.com") is True
     assert _is_third_party_domain("klaviyo.com") is True
+    assert _is_third_party_domain("e.customeriomail.com") is True
+    assert _is_third_party_domain("customeriomail.com") is True
 
 
 def test_domain_entropy():
@@ -529,7 +570,8 @@ if __name__ == "__main__":
         test_data_uri_attack, test_excessive_subdomains, test_shortener_with_brand_context,
         test_perfect_storm_phish, test_legit_newsletter, test_legit_bank_notification,
         test_legit_password_reset, test_legit_ecommerce_receipt,
-        test_legit_marketing_with_tracking, test_legit_plain_text_no_urls,
+        test_legit_marketing_with_tracking, test_legit_devpost_style_customer_io_newsletter,
+        test_adjust_score_when_spf_dkim_dmarc_pass, test_legit_plain_text_no_urls,
         test_legit_gmail_sender, test_legit_shipping_notification,
         test_legit_saas_notification, test_legit_docusign,
         test_legit_multi_tracking_pixels, test_legit_internal_company_email,

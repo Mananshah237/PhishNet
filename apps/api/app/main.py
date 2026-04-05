@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.models import Artifact, Detection, Email, OpenSafelyJob, Rewrite
+from app.auth_results import parse_authentication_from_raw_headers
 
 from dotenv import load_dotenv
 
@@ -47,7 +48,7 @@ _KNOWN_THIRD_PARTY = {
     "mailjet.com", "postmarkapp.com", "sparkpostmail.com", "sendinblue.com",
     "brevo.com", "klaviyo.com", "convertkit.com", "drip.com",
     "aweber.com", "getresponse.com", "activecampaign.com",
-    "customer.io", "intercom.io", "intercom.com", "zendesk.com",
+    "customer.io", "customeriomail.com", "intercom.io", "intercom.com", "zendesk.com",
     "freshdesk.com", "helpscout.com", "drift.com",
     "cloudfront.net", "akamaihd.net", "googleapis.com", "gstatic.com",
     "cloudflare.com", "fastly.net", "edgekey.net", "azureedge.net",
@@ -447,6 +448,9 @@ def _heuristic_detect_fallback(e) -> tuple[int, str, list[str]]:
             has_excessive_subdomains = True
 
         brand_in_sub = _brand_in_url_subdomain(host)
+        # Sponsor/partner names in subdomains on the sender's own domain (e.g. amazon-nova.devpost.com)
+        if brand_in_sub and sender_reg and _registrable_domain(host) == sender_reg:
+            brand_in_sub = None
         if brand_in_sub and not has_brand_subdomain:
             reasons.append(f"Brand '{brand_in_sub}' used as subdomain of unrelated domain: {host}")
             score += 30
@@ -753,6 +757,7 @@ def get_email(email_id: str, db: Session = Depends(get_db)):
         },
         "body": {"text": e.body_text or ""},
         "links": {"defanged": e.defanged_urls or []},
+        "mail_authentication": parse_authentication_from_raw_headers(e.raw_headers),
         "analysis": {
             "detection": (None if not det else {"label": det.label, "risk_score": det.risk_score, "reasons": det.reasons}),
             "rewrite": (None if not rw else {"safe_subject": rw.safe_subject, "safe_body": rw.safe_body, "used_llm": rw.used_llm}),
@@ -826,6 +831,32 @@ def _run_bert_detection(subject, from_addr, body_text, urls):
         return None
 
 
+def _adjust_combined_score_for_mail_auth(
+    score: int, label: str, raw_headers: str | None
+) -> tuple[int, str, list[str]]:
+    """
+    When Authentication-Results reports SPF+DKIM+DMARC pass, reduce the combined score.
+    ML models often flag legitimate marketing/ESP mail; auth is independent corroboration.
+    """
+    auth = parse_authentication_from_raw_headers(raw_headers or "")
+    spf = (auth.get("spf") or "").lower()
+    dkim = (auth.get("dkim") or "").lower()
+    dmarc = (auth.get("dmarc") or "").lower()
+    if auth.get("source") == "none" or spf != "pass" or dkim != "pass" or dmarc != "pass":
+        return score, label, []
+
+    before = score
+    adjusted = max(0, score - 55)
+    new_label = (
+        "phishing" if adjusted >= 65 else "suspicious" if adjusted >= 30 else "benign"
+    )
+    note = (
+        f"Strong mail authentication (SPF/DKIM/DMARC pass per headers): "
+        f"combined score adjusted {before} → {adjusted}."
+    )
+    return adjusted, new_label, [note] if before > 0 else []
+
+
 @app.get("/detect/methods")
 def available_methods():
     return {
@@ -886,6 +917,14 @@ async def detect(email_id: str, method: str = "heuristic", db: Session = Depends
             final_label = label
 
     final_score = max(0, min(100, final_score))
+
+    adj_score, adj_label, auth_notes = _adjust_combined_score_for_mail_auth(
+        final_score, final_label, e.raw_headers
+    )
+    if auth_notes:
+        all_reasons.extend(auth_notes)
+    final_score = adj_score
+    final_label = adj_label
 
     det = Detection(
         email_id=email_id, label=final_label, risk_score=final_score,

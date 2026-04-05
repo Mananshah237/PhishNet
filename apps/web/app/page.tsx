@@ -14,6 +14,14 @@ type EmailListItem = {
   created_at: string;
 };
 
+type MailAuthentication = {
+  source: string;
+  spf: string | null;
+  dkim: string | null;
+  dmarc: string | null;
+  note: string;
+};
+
 type EmailDetail = {
   id: string;
   source?: string;
@@ -21,6 +29,7 @@ type EmailDetail = {
   headers?: { subject?: string | null; from?: string | null };
   body?: { text?: string };
   links?: { defanged?: string[] };
+  mail_authentication?: MailAuthentication;
   analysis?: any;
 };
 
@@ -73,6 +82,15 @@ function IconRefresh() {
 
 function apiBase() {
   return process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000';
+}
+
+function authResultClass(v: string | null | undefined): string {
+  if (!v) return 'auth-chip auth-chip--unknown';
+  const x = v.toLowerCase();
+  if (x === 'pass' || x === 'bestguesspass') return 'auth-chip auth-chip--pass';
+  if (x === 'fail' || x === 'permerror') return 'auth-chip auth-chip--fail';
+  if (x === 'softfail' || x === 'temperror') return 'auth-chip auth-chip--warn';
+  return 'auth-chip auth-chip--neutral';
 }
 
 /* ------------------------------------------------------------------ */
@@ -543,6 +561,29 @@ export default function Home() {
                 </div>
                 {riskBadge()}
               </div>
+
+              {/* SPF/DKIM/DMARC from provider headers (parsed, not re-verified) */}
+              {detail.mail_authentication ? (
+                <div className="auth-panel">
+                  <div className="auth-panel-title">Mail authentication (from headers)</div>
+                  <div className="auth-panel-source">
+                    Source:{' '}
+                    <code>{detail.mail_authentication.source}</code>
+                  </div>
+                  <div className="auth-chips">
+                    <span className={authResultClass(detail.mail_authentication.spf)}>
+                      SPF: {detail.mail_authentication.spf ?? 'not stated'}
+                    </span>
+                    <span className={authResultClass(detail.mail_authentication.dkim)}>
+                      DKIM: {detail.mail_authentication.dkim ?? 'not stated'}
+                    </span>
+                    <span className={authResultClass(detail.mail_authentication.dmarc)}>
+                      DMARC: {detail.mail_authentication.dmarc ?? 'not stated'}
+                    </span>
+                  </div>
+                  <p className="auth-panel-note">{detail.mail_authentication.note}</p>
+                </div>
+              ) : null}
 
               {/* Toolbar */}
               <div className="toolbar">
