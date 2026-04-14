@@ -92,7 +92,7 @@ git lfs install
 
 ```bash
 git clone https://github.com/Mananshah237/PhishNet.git
-cd PhishNet2
+cd PhishNet
 ```
 
 Pull LFS objects if needed:
