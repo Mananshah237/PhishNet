@@ -21,6 +21,8 @@ apps/api/data/phishnet.db
 
 # claude code
 .claude/
+CLAUDE.md
+claude.md
 
 # openclaw agent workspace (not part of the product repo)
 AGENTS.md

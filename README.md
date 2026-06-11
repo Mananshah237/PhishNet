@@ -120,13 +120,17 @@ First run: image builds, dependencies install, Ollama may download **Llama 3.2 1
 
 ### 5. Access
 
-* **Frontend:** http://localhost:3000  
-* **API docs:** http://localhost:8000/docs  
+* **Frontend:** http://localhost:3002  
+* **API docs:** http://localhost:8002/docs  
+
+> **Ports:** web **3002**, API **8002**, Ollama **11434**. These are offset from the
+> other projects (VEXIS 3000/8000, AegisScan 3001/8001) so all three can run at once
+> for a side-by-side demo.
 
 ### 6. Verify detection backends
 
 ```bash
-curl http://localhost:8000/detect/methods
+curl http://localhost:8002/detect/methods
 ```
 
 Example:
@@ -162,6 +166,28 @@ python bert/train.py
 ```
 
 Training pulls Hugging Face datasets as configured in `train.py`, uses GPU when available, and overwrites `bert/model/` (including `training_meta.json`). Duration depends on hardware and dataset sizes.
+
+> **Heads-up after cloning:** the BERT classifier will silently fall back / report `bert: false` if the LFS object hasn't been fetched — `apps/api/bert/model/model.safetensors` must be the real ~268 MB file, not a small LFS pointer. Always run `git lfs pull` after clone. (This was the single most common "it doesn't detect anything" failure.)
+
+### Verified
+
+The BERT classifier was loaded from the shipped checkpoint and sanity-checked:
+
+| Input | Result |
+|-------|--------|
+| Spoofed-PayPal phishing mail with a `.tk` credential-harvest URL | `score=99, label=phishing` (100% phishing prob) |
+| Plain "lunch tomorrow?" coworker mail | `score=0, label=benign` (100% legit) |
+
+Model holdout metrics: **acc 99.3% / F1 99.3%**.
+
+## Optimization & improvement roadmap
+
+1. **GPU inference path.** Inference is CPU-only (`requirements.txt` comment). Add an optional CUDA image variant and move the model to `cuda` in `bert_engine._load_model()` when available, for ~10× faster batch scoring.
+2. **Batch / async the three detectors.** "All" mode runs heuristic + BERT + LLM sequentially. Run them concurrently (`asyncio.gather`, with the BERT call in a thread executor) to cut latency to the slowest detector.
+3. **Cache the BERT model in memory across requests** (it already lazy-loads once) and add a small warmup call on startup so the first user request isn't slow.
+4. **Quantize the model** (`torch.quantization` / ONNX Runtime int8) to shrink the 268 MB checkpoint and speed CPU inference, with negligible accuracy loss at this F1.
+5. **Real SPF/DKIM/DMARC verification (optional).** Today header `Authentication-Results` values are trusted as reported. Add opt-in DNS re-verification for higher-assurance scoring.
+6. **Pin the Ollama model digest** and pre-pull during build so the first stack start isn't gated on a 1.3 GB download.
 
 ---
 

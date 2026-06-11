@@ -46,7 +46,7 @@ services:
       - ./apps/api/data:/app/data
       - ./apps/api/bert/model:/app/bert/model
     ports:
-      - "8000:8000"
+      - "8002:8000"
 
   # 4. The Runner (Kept as is, just ensuring it connects to API network/logic if needed)
   runner:
@@ -64,9 +64,9 @@ services:
       context: ./apps/web
     container_name: phishnet-ui
     ports:
-      - "3000:3000"
+      - "3002:3000"
     environment:
-      - NEXT_PUBLIC_API_BASE=http://localhost:8000
+      - NEXT_PUBLIC_API_BASE=http://localhost:8002
     depends_on:
       - api
 
