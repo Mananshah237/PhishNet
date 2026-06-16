@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "PhishNet — Phishing Email Scanner",
+  "version": "0.1.0",
+  "description": "Scan the email you are reading in Gmail for phishing. Free, with on-device personalization that adapts to you.",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "https://mail.google.com/*",
+    "http://localhost:8002/*",
+    "http://127.0.0.1:8002/*"
+  ],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "PhishNet"
+  },
+  "options_page": "options.html",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://mail.google.com/*"],
+      "js": ["config.js", "personalization.js", "content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

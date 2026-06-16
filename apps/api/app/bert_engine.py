@@ -39,16 +39,30 @@ def bert_available() -> bool:
 
 
 def _build_input_text(subject: str, from_addr: str, body_text: str, urls: list[str]) -> str:
-    """Build a structured input string matching the training format."""
-    # Use [SEP] as field separator — same format used in train.py
-    parts = [
-        f"subject: {subject.strip()}",
-        f"from: {from_addr.strip()}",
-        f"body: {body_text[:1500].strip()}",
-    ]
+    """Build the structured input string matching the TRAINING format exactly.
+
+    The model was fine-tuned on the two-field structure
+        "subject: {subject} [SEP] body: {body}"
+    (see bert/train.py:_format_row and training_meta.json["input_format"]).
+    Feeding extra [SEP] fields at inference time (from:, urls:) gives the model
+    a token structure it never saw in training, which degrades accuracy. The
+    sender and URLs still carry signal, so we fold them into the body text
+    instead of adding new [SEP] fields, keeping train/serve formats aligned.
+    """
+    body = body_text[:1500].strip()
+    extras = []
+    if from_addr and from_addr.strip():
+        extras.append(f"from {from_addr.strip()}")
     if urls:
-        parts.append(f"urls: {' '.join(urls[:10])}")
-    return " [SEP] ".join(parts)
+        extras.append("links " + " ".join(urls[:10]))
+    if extras:
+        body = (body + " " + " ".join(extras)).strip()
+
+    # Honor the exact format recorded at training time when available.
+    fmt = (_meta or {}).get("input_format") if _meta else None
+    if fmt and "{subject}" in fmt and "{body}" in fmt:
+        return fmt.format(subject=subject.strip(), body=body)
+    return f"subject: {subject.strip()} [SEP] body: {body}"
 
 
 def _get_max_length() -> int:

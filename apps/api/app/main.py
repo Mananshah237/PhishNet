@@ -609,12 +609,22 @@ def get_db() -> Session:
 
 app = FastAPI(title="PhishNet API", version="0.1.0")
 
+# Allowed origins are configurable so the same backend works locally and when
+# hosted. Browser extensions (Chrome/Edge/Firefox) are allowed via regex.
+_DEFAULT_ORIGINS = (
+    "http://localhost:3000,http://127.0.0.1:3000,"
+    "http://localhost:3002,http://127.0.0.1:3002"
+)
+_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv("PHISHNET_ALLOWED_ORIGINS", _DEFAULT_ORIGINS).split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000", "http://127.0.0.1:3000",
-        "http://localhost:3002", "http://127.0.0.1:3002",
-    ],
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_origin_regex=r"chrome-extension://.*|moz-extension://.*",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -712,6 +722,59 @@ async def upload_eml(file: UploadFile = File(...), db: Session = Depends(get_db)
     db.add(email)
     db.commit()
     return {"email_id": email.id}
+
+
+class AnalyzeRequest(BaseModel):
+    """Structured email payload sent by the browser extension (no file upload).
+
+    Gmail/Outlook clients already have the parsed fields, so they POST JSON here
+    instead of reconstructing a .eml. `headers` is the raw header block (used for
+    SPF/DKIM/DMARC parsing); `urls` is optional — if omitted we extract them.
+    """
+    subject: Optional[str] = ""
+    from_addr: Optional[str] = ""
+    to_addr: Optional[str] = ""
+    headers: Optional[str] = ""
+    body_text: Optional[str] = ""
+    body_html: Optional[str] = ""
+    urls: Optional[list[str]] = None
+    method: str = "heuristic,bert"
+
+
+@app.post("/analyze", response_model=DetectionResult)
+async def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
+    """One-shot analyze for the extension: ingest structured fields + detect."""
+    text_body = req.body_text or ""
+    html_body = req.body_html or ""
+    if not text_body and html_body:
+        text_body = html_to_text(html_body)
+
+    if req.urls:
+        urls = req.urls
+    else:
+        combined = "\n".join([text_body, html_body]).strip()
+        urls = extract_urls(combined)
+    defanged = [defang_url(u) for u in urls]
+
+    email = Email(
+        id=str(uuid.uuid4()),
+        source="api:analyze",
+        subject=req.subject or "",
+        from_addr=req.from_addr or "",
+        to_addr=req.to_addr or "",
+        date_hdr=None,
+        raw_headers=req.headers or "",
+        body_text=text_body or "",
+        body_html=html_body or "",
+        extracted_urls=urls,
+        defanged_urls=defanged,
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(email)
+    db.commit()
+
+    # Reuse the exact detection + mail-auth pipeline used by /detect.
+    return await detect(email.id, req.method, db)
 
 
 @app.get("/emails", response_model=list[EmailListItem])

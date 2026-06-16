@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font: 13px/1.45 Arial, sans-serif; width: 260px; margin: 0; padding: 14px; color: #202124; }
+    h1 { font-size: 15px; margin: 0 0 8px; }
+    .stat { color: #5f6368; margin: 6px 0; }
+    #status { font-weight: 600; }
+    a { color: #1a73e8; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>🛡 PhishNet</h1>
+  <div class="stat">Backend: <span id="backend">—</span></div>
+  <div class="stat">Status: <span id="status">checking…</span></div>
+  <div class="stat" id="learn">—</div>
+  <div class="stat">Open an email in Gmail and click <b>Scan email</b>.</div>
+  <div class="stat"><a id="opts">Settings</a></div>
+  <script src="config.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

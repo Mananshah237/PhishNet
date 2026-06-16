@@ -1,14 +1,70 @@
 """
 Fine-tune DistilBERT for phishing email classification.
-Run: pip install -r bert/requirements-train.txt && python bert/train.py
 
-Uses GPU (CUDA) automatically. Downloads ALL available datasets.
-No sample cap — uses every row available for maximum precision.
+SELF-CONTAINED: copy this single file to a machine with an NVIDIA GPU and run
+
+    python train.py
+
+It installs everything it needs (including the CUDA build of PyTorch) and
+downloads all datasets automatically. The trained model is written to ./model
+next to this file. Move that ./model folder back into
+apps/api/bert/model on the serving machine.
+
+Tunable via environment variables (all optional):
+    PHISHNET_EPOCHS              (default 12)   training epochs (early-stopped)
+    PHISHNET_BATCH_SIZE          (default 16)   per-device batch (8GB-safe)
+    PHISHNET_GRAD_ACCUM          (default 2)    gradient accumulation steps
+    PHISHNET_GRAD_CHECKPOINTING  (default 1)    1=on (saves VRAM), 0=off
+    PHISHNET_EARLY_STOP_PATIENCE (default 2)    epochs without F1 gain before stop
+    PHISHNET_NO_BOOTSTRAP        (default 0)    1=skip the auto dependency install
 """
 
 import io
 import os
+import sys
 import json
+import subprocess
+
+
+def _ensure_deps() -> None:
+    """Install every dependency this script needs, so a bare `python train.py`
+    works on a fresh GPU machine. Set PHISHNET_NO_BOOTSTRAP=1 to skip."""
+    if os.getenv("PHISHNET_NO_BOOTSTRAP", "0") == "1":
+        return
+    import importlib.util
+
+    def have(mod: str) -> bool:
+        return importlib.util.find_spec(mod) is not None
+
+    def pip(*args: str) -> None:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *args])
+
+    if not have("torch"):
+        print(">> Installing PyTorch (CUDA 12.1 build) ...")
+        try:
+            pip("torch", "--index-url", "https://download.pytorch.org/whl/cu121")
+        except Exception:
+            print(">> CUDA wheel failed — installing default PyTorch instead.")
+            pip("torch")
+
+    # import-name -> pip spec
+    pkgs = {
+        "transformers": "transformers>=4.36.0",
+        "datasets": "datasets>=2.16.0",
+        "sklearn": "scikit-learn>=1.3.0",
+        "pandas": "pandas>=2.0.0",
+        "numpy": "numpy>=1.24.0",
+        "requests": "requests",
+        "accelerate": "accelerate>=0.26.0",  # required by transformers.Trainer
+    }
+    missing = [spec for mod, spec in pkgs.items() if not have(mod)]
+    if missing:
+        print(f">> Installing: {', '.join(missing)}")
+        pip(*missing)
+
+
+_ensure_deps()
+
 import numpy as np
 import pandas as pd
 import requests
@@ -21,6 +77,7 @@ from transformers import (
     DistilBertForSequenceClassification,
     TrainingArguments,
     Trainer,
+    EarlyStoppingCallback,
 )
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.model_selection import train_test_split
@@ -28,13 +85,20 @@ from sklearn.model_selection import train_test_split
 MODEL_NAME = "distilbert-base-uncased"
 OUTPUT_DIR = Path(__file__).parent / "model"
 MAX_LENGTH = 512
-EPOCHS = 6
+# Train longer by default ("a lot more"), but EarlyStoppingCallback (below) stops
+# once validation F1 stops improving, so extra epochs don't just overfit.
+EPOCHS = int(os.getenv("PHISHNET_EPOCHS", "12"))
+EARLY_STOP_PATIENCE = int(os.getenv("PHISHNET_EARLY_STOP_PATIENCE", "2"))
 LEARNING_RATE = 2e-5
 WARMUP_RATIO = 0.1
 WEIGHT_DECAY = 0.01
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-BATCH_SIZE = 32 if DEVICE == "cuda" else 16
+# Defaults tuned for an 8 GB GPU (e.g. RTX 3070) at MAX_LENGTH=512.
+# batch 16 * grad-accum 2 = effective batch 32, fits in 8 GB with checkpointing.
+BATCH_SIZE = int(os.getenv("PHISHNET_BATCH_SIZE", "16" if DEVICE == "cuda" else "8"))
+GRAD_ACCUM = int(os.getenv("PHISHNET_GRAD_ACCUM", "2"))
+GRAD_CHECKPOINTING = os.getenv("PHISHNET_GRAD_CHECKPOINTING", "1") == "1"
 USE_FP16 = DEVICE == "cuda"
 
 
@@ -226,6 +290,15 @@ def main():
         props = torch.cuda.get_device_properties(0)
         print(f"GPU    : {props.name}")
         print(f"VRAM   : {props.total_memory / 1e9:.1f} GB")
+        print(f"Config : epochs={EPOCHS} batch={BATCH_SIZE} grad_accum={GRAD_ACCUM} "
+              f"(effective batch {BATCH_SIZE * GRAD_ACCUM}) checkpointing={GRAD_CHECKPOINTING}")
+    else:
+        print("\n" + "!" * 70)
+        print("WARNING: CUDA GPU not detected — training will run on CPU (very slow).")
+        print("Install the CUDA build of PyTorch:")
+        print("  pip install torch --index-url https://download.pytorch.org/whl/cu121")
+        print("Then verify: python -c \"import torch; print(torch.cuda.is_available())\"")
+        print("!" * 70 + "\n")
 
     # ── Load data ────────────────────────────────────────────────────────────
     all_frames = []
@@ -314,6 +387,8 @@ def main():
         num_train_epochs=EPOCHS,
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
+        gradient_accumulation_steps=GRAD_ACCUM,
+        gradient_checkpointing=GRAD_CHECKPOINTING,
         learning_rate=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
         warmup_ratio=WARMUP_RATIO,
@@ -334,6 +409,7 @@ def main():
         eval_dataset=ds["val"],
         compute_metrics=compute_metrics,
         processing_class=tokenizer,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=EARLY_STOP_PATIENCE)],
     )
 
     print(f"\nStarting training on {DEVICE.upper()} | batch={BATCH_SIZE} | fp16={USE_FP16} | epochs={EPOCHS}\n")
