@@ -82,16 +82,50 @@ from transformers import (
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.model_selection import train_test_split
 
+import datetime
+
 MODEL_NAME = "distilbert-base-uncased"
 OUTPUT_DIR = Path(__file__).parent / "model"
-MAX_LENGTH = 512
+# For large corpora, 256 trains ~2x faster than 512 with little accuracy loss.
+MAX_LENGTH = int(os.getenv("PHISHNET_MAX_LENGTH", "512"))
 # Train longer by default ("a lot more"), but EarlyStoppingCallback (below) stops
 # once validation F1 stops improving, so extra epochs don't just overfit.
+# For very large datasets use fewer epochs (e.g. PHISHNET_EPOCHS=3).
 EPOCHS = int(os.getenv("PHISHNET_EPOCHS", "12"))
 EARLY_STOP_PATIENCE = int(os.getenv("PHISHNET_EARLY_STOP_PATIENCE", "2"))
 LEARNING_RATE = 2e-5
 WARMUP_RATIO = 0.1
 WEIGHT_DECAY = 0.01
+
+# ── Data scale + recency weighting ───────────────────────────────────────────
+# Phishing tactics age, so each example is weighted by how recent its SOURCE is
+# (newer corpora count more; old Enron/SMS spam counts less). "range it by time".
+CURRENT_YEAR = datetime.date.today().year
+RECENCY_HALFLIFE = float(os.getenv("PHISHNET_RECENCY_HALFLIFE_YEARS", "4"))  # weight halves every N years
+USE_RECENCY = os.getenv("PHISHNET_USE_RECENCY", "1") == "1"
+MAX_AGE_YEARS = int(os.getenv("PHISHNET_MAX_AGE_YEARS", "0"))  # 0 = keep everything; else drop older
+# Balancing: "downsample" (old behaviour, discards majority), "cap" (keep all
+# minority + majority up to MAX_IMBALANCE×), or "all" (use everything).
+BALANCE_MODE = os.getenv("PHISHNET_BALANCE", "cap")
+MAX_IMBALANCE = float(os.getenv("PHISHNET_MAX_IMBALANCE", "2.0"))
+
+
+def _recency_weight(vintage_year: int) -> float:
+    """Exponential decay by source age; recent ≈ 1.0, old → small."""
+    age = max(0, CURRENT_YEAR - int(vintage_year))
+    return 0.5 ** (age / RECENCY_HALFLIFE)
+
+
+# Approximate vintage (year) of each source, used for recency weighting.
+SOURCE_VINTAGE: dict[str, int] = {
+    "local": 2024,
+    "zefang-liu/phishing-email-dataset": 2022,
+    "SetFit/enron_spam": 2002,
+    "cybersectony/PhishingEmailDetectionv2.0": 2024,
+    "Deysi/spam-detection-dataset": 2023,
+    "ucirvine/sms_spam": 2011,
+    "github/GregaVrbancic": 2020,
+}
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Defaults tuned for an 8 GB GPU (e.g. RTX 3070) at MAX_LENGTH=512.
@@ -186,6 +220,7 @@ def load_all_hf_datasets() -> list[pd.DataFrame]:
         for name, df in splits:
             out = _extract_text_label(df, label_map=lambda x: 1 if "phish" in str(x).lower() else 0)
             if out is not None:
+                out["vintage"] = SOURCE_VINTAGE["zefang-liu/phishing-email-dataset"]
                 print(f"    {name}: {len(out)} rows  (phish={out['label'].sum()}, legit={len(out)-out['label'].sum()})")
                 frames.append(out)
 
@@ -195,6 +230,7 @@ def load_all_hf_datasets() -> list[pd.DataFrame]:
         for name, df in splits:
             out = _extract_text_label(df)
             if out is not None:
+                out["vintage"] = SOURCE_VINTAGE["SetFit/enron_spam"]
                 print(f"    {name}: {len(out)} rows  (phish={out['label'].sum()}, legit={len(out)-out['label'].sum()})")
                 frames.append(out)
 
@@ -212,6 +248,7 @@ def load_all_hf_datasets() -> list[pd.DataFrame]:
                     out["text"] = df[text_col].fillna("").apply(lambda t: _format_row("", str(t)))
                     out["label"] = df["label"].astype(int)
                     out = out.dropna()
+                    out["vintage"] = SOURCE_VINTAGE["cybersectony/PhishingEmailDetectionv2.0"]
                     print(f"    {name}: {len(out)} rows  (phish={out['label'].sum()}, legit={len(out)-out['label'].sum()})")
                     frames.append(out)
 
@@ -221,6 +258,7 @@ def load_all_hf_datasets() -> list[pd.DataFrame]:
         for name, df in splits:
             out = _extract_text_label(df, label_map=lambda x: 1 if str(x).lower() in ("spam", "1", "true") else 0)
             if out is not None:
+                out["vintage"] = SOURCE_VINTAGE["Deysi/spam-detection-dataset"]
                 print(f"    {name}: {len(out)} rows  (phish={out['label'].sum()}, legit={len(out)-out['label'].sum()})")
                 frames.append(out)
 
@@ -230,6 +268,7 @@ def load_all_hf_datasets() -> list[pd.DataFrame]:
         for name, df in splits:
             out = _extract_text_label(df, label_map=lambda x: 1 if str(x).lower() in ("spam", "1") else 0)
             if out is not None:
+                out["vintage"] = SOURCE_VINTAGE["ucirvine/sms_spam"]
                 print(f"    {name}: {len(out)} rows  (phish={out['label'].sum()}, legit={len(out)-out['label'].sum()})")
                 frames.append(out)
 
@@ -257,6 +296,7 @@ def load_all_hf_datasets() -> list[pd.DataFrame]:
                 out["label"] = df[lc].apply(src["label_map"])
                 out = out.dropna()
                 out["label"] = out["label"].astype(int)
+                out["vintage"] = SOURCE_VINTAGE["github/GregaVrbancic"]
                 print(f"    {len(out)} rows  (phish={out['label'].sum()}, legit={len(out)-out['label'].sum()})")
                 frames.append(out)
         except Exception as e:
@@ -306,6 +346,7 @@ def main():
     data_dir = Path(__file__).parent / "dataset"
     try:
         local_df = load_local_data(data_dir)
+        local_df["vintage"] = SOURCE_VINTAGE["local"]
         all_frames.append(local_df)
         print(f"Local dataset: {len(local_df)} rows")
     except FileNotFoundError:
@@ -317,8 +358,18 @@ def main():
     if not all_frames:
         raise RuntimeError("No data loaded. Place a CSV in apps/api/bert/dataset/")
 
-    df = pd.concat(all_frames, ignore_index=True).dropna()
+    df = pd.concat(all_frames, ignore_index=True)
+    df = df.dropna(subset=["text", "label"]).reset_index(drop=True)
+    if "vintage" not in df.columns:
+        df["vintage"] = 2020
+    df["vintage"] = df["vintage"].fillna(2020).astype(int)
     df = df.drop_duplicates(subset=["text"]).reset_index(drop=True)
+
+    # Optional hard age cutoff (drop sources older than N years)
+    if MAX_AGE_YEARS > 0:
+        before = len(df)
+        df = df[(CURRENT_YEAR - df["vintage"]) <= MAX_AGE_YEARS].reset_index(drop=True)
+        print(f"Age cutoff ≤{MAX_AGE_YEARS}y: dropped {before - len(df)} older rows")
 
     n_phish = int(df["label"].sum())
     n_legit = len(df) - n_phish
@@ -326,12 +377,34 @@ def main():
     print(f"  Phishing        : {n_phish}")
     print(f"  Legit           : {n_legit}")
 
-    # ── Balance classes (use ALL of the minority, match with majority) ───────
-    minority = min(n_phish, n_legit)
-    phish_df = df[df["label"] == 1].sample(n=minority, random_state=42)
-    legit_df = df[df["label"] == 0].sample(n=minority, random_state=42)
+    # ── Balancing strategy ───────────────────────────────────────────────────
+    # "downsample" discards data; "cap" keeps all minority + majority up to
+    # MAX_IMBALANCE×; "all" keeps everything (class weights handle the imbalance).
+    phish_df = df[df["label"] == 1]
+    legit_df = df[df["label"] == 0]
+    minority = min(len(phish_df), len(legit_df))
+    if BALANCE_MODE == "downsample":
+        phish_df = phish_df.sample(n=minority, random_state=42)
+        legit_df = legit_df.sample(n=minority, random_state=42)
+    elif BALANCE_MODE == "cap":
+        cap = int(minority * MAX_IMBALANCE)
+        if len(phish_df) > cap:
+            phish_df = phish_df.sample(n=cap, random_state=42)
+        if len(legit_df) > cap:
+            legit_df = legit_df.sample(n=cap, random_state=42)
     df = pd.concat([phish_df, legit_df]).sample(frac=1, random_state=42).reset_index(drop=True)
-    print(f"\nBalanced dataset  : {len(df)} ({minority} phish + {minority} legit)")
+    print(f"\nTraining set ({BALANCE_MODE}): {len(df)} rows "
+          f"({int(df['label'].sum())} phish + {len(df) - int(df['label'].sum())} legit)")
+
+    # ── Recency weight per row (newer source → higher weight) ────────────────
+    if USE_RECENCY:
+        df["weight"] = df["vintage"].apply(_recency_weight)
+        df["weight"] = df["weight"] / df["weight"].mean()  # normalise to mean 1.0
+    else:
+        df["weight"] = 1.0
+    print(f"Recency weighting : {'ON' if USE_RECENCY else 'off'} "
+          f"(half-life {RECENCY_HALFLIFE}y) — per-row weight "
+          f"[{df['weight'].min():.2f} … {df['weight'].max():.2f}]")
 
     # ── Split ────────────────────────────────────────────────────────────────
     train_df, temp_df = train_test_split(df, test_size=0.15, random_state=42, stratify=df["label"])
@@ -351,7 +424,7 @@ def main():
         "test":  Dataset.from_pandas(test_df,  preserve_index=False),
     })
     ds = ds.map(tokenize, batched=True, num_proc=1)
-    ds.set_format("torch", columns=["input_ids", "attention_mask", "label"])
+    ds.set_format("torch", columns=["input_ids", "attention_mask", "label", "weight"])
 
     # ── Model ────────────────────────────────────────────────────────────────
     model = DistilBertForSequenceClassification.from_pretrained(
@@ -370,10 +443,17 @@ def main():
 
     class WeightedTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+            # Per-sample recency weight (set to 1.0 when recency is off).
+            sample_w = inputs.pop("weight", None)
             labels = inputs.pop("labels")
             outputs = model(**inputs)
-            loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights.to(outputs.logits.device))
-            loss = loss_fn(outputs.logits, labels)
+            ce = torch.nn.CrossEntropyLoss(
+                weight=class_weights.to(outputs.logits.device), reduction="none"
+            )
+            per_sample = ce(outputs.logits, labels)
+            if sample_w is not None:
+                per_sample = per_sample * sample_w.to(per_sample.device).float()
+            loss = per_sample.mean()
             return (loss, outputs) if return_outputs else loss
 
     # ── Training args ────────────────────────────────────────────────────────
@@ -400,6 +480,8 @@ def main():
         fp16=USE_FP16,
         dataloader_num_workers=0,
         report_to="none",
+        # Keep the per-sample "weight" column (not a model arg) for the loss.
+        remove_unused_columns=False,
     )
 
     trainer = WeightedTrainer(
@@ -437,6 +519,11 @@ def main():
         "total_samples": len(df),
         "train_samples": len(train_df),
         "input_format": "subject: {subject} [SEP] body: {body}",
+        "balance_mode": BALANCE_MODE,
+        "max_imbalance": MAX_IMBALANCE,
+        "recency_weighting": USE_RECENCY,
+        "recency_halflife_years": RECENCY_HALFLIFE,
+        "max_age_years": MAX_AGE_YEARS,
         "test_accuracy":  results.get("eval_accuracy",  0),
         "test_f1":        results.get("eval_f1",        0),
         "test_precision": results.get("eval_precision", 0),

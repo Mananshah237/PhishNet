@@ -6,6 +6,11 @@ const PN_DEFAULTS = {
   backendUrl: "http://localhost:8002",
   method: "heuristic,bert", // engines to request; LLM is opt-in (slow/costly)
   personalize: true,
+  // API key for the PhishNet backend. The backend requires an API key on all
+  // data endpoints (sent as the X-API-Key header). Set this in the extension
+  // Options page to the key your operator provisioned. Leave blank only when the
+  // backend runs with PHISHNET_AUTH_DISABLED=1 (local development).
+  apiKey: "",
 };
 
 async function pnGetConfig() {

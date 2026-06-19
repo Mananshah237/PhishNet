@@ -51,20 +51,58 @@
     const panel = document.createElement("div");
     panel.id = PANEL_ID;
     const color = colorFor(result.label);
-    panel.innerHTML = `
-      <div class="pn-panel-head" style="background:${color}">
-        <span>PhishNet: ${result.label.toUpperCase()} — ${result.risk_score}/100</span>
-        <button id="pn-close" title="Close">×</button>
-      </div>
-      <div class="pn-panel-body">
-        <ul>${result.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>
-        <div class="pn-feedback">
-          <span>Was this right?</span>
-          <button id="pn-mark-safe">Mark safe</button>
-          <button id="pn-mark-phish">Mark phishing</button>
-        </div>
-        <div id="pn-fb-msg" class="pn-fb-msg"></div>
-      </div>`;
+
+    // Treat ALL backend fields (label, risk_score, reasons) as untrusted: build
+    // the DOM with textContent rather than interpolating into innerHTML, to
+    // prevent XSS from a compromised/spoofed backend response.
+    const label = String(result.label || "");
+    const score = Number(result.risk_score);
+    const scoreText = Number.isFinite(score) ? String(score) : "?";
+
+    const head = document.createElement("div");
+    head.className = "pn-panel-head";
+    head.style.background = color;
+    const headSpan = document.createElement("span");
+    headSpan.textContent = `PhishNet: ${label.toUpperCase()} — ${scoreText}/100`;
+    const closeBtn = document.createElement("button");
+    closeBtn.id = "pn-close";
+    closeBtn.title = "Close";
+    closeBtn.textContent = "×";
+    head.appendChild(headSpan);
+    head.appendChild(closeBtn);
+
+    const body = document.createElement("div");
+    body.className = "pn-panel-body";
+    const ul = document.createElement("ul");
+    (Array.isArray(result.reasons) ? result.reasons : []).forEach((r) => {
+      const li = document.createElement("li");
+      li.textContent = String(r);
+      ul.appendChild(li);
+    });
+    body.appendChild(ul);
+
+    const fb = document.createElement("div");
+    fb.className = "pn-feedback";
+    const fbLabel = document.createElement("span");
+    fbLabel.textContent = "Was this right?";
+    const safeBtn = document.createElement("button");
+    safeBtn.id = "pn-mark-safe";
+    safeBtn.textContent = "Mark safe";
+    const phishBtn = document.createElement("button");
+    phishBtn.id = "pn-mark-phish";
+    phishBtn.textContent = "Mark phishing";
+    fb.appendChild(fbLabel);
+    fb.appendChild(safeBtn);
+    fb.appendChild(phishBtn);
+    body.appendChild(fb);
+
+    const fbMsg = document.createElement("div");
+    fbMsg.id = "pn-fb-msg";
+    fbMsg.className = "pn-fb-msg";
+    body.appendChild(fbMsg);
+
+    panel.appendChild(head);
+    panel.appendChild(body);
     document.body.appendChild(panel);
 
     document.getElementById("pn-close").onclick = removePanel;
@@ -79,12 +117,6 @@
     const msg = document.getElementById("pn-fb-msg");
     if (msg)
       msg.textContent = `Thanks — PhishNet adapted to you (${state.count} corrections learned).`;
-  }
-
-  function escapeHtml(s) {
-    const d = document.createElement("div");
-    d.textContent = String(s);
-    return d.innerHTML;
   }
 
   async function runScan() {
@@ -106,9 +138,11 @@
     );
 
     try {
+      const headers = { "Content-Type": "application/json" };
+      if (cfg.apiKey) headers["X-API-Key"] = cfg.apiKey;
       const resp = await fetch(`${cfg.backendUrl.replace(/\/$/, "")}/analyze`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ ...meta, method: cfg.method }),
       });
       if (!resp.ok) throw new Error(`backend ${resp.status}`);

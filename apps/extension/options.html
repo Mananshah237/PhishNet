@@ -21,6 +21,10 @@
   <input type="text" id="backendUrl" placeholder="http://localhost:8002" />
   <div class="muted">Where your PhishNet backend runs. Local by default; point this at a hosted instance to use it anywhere.</div>
 
+  <label for="apiKey">API key</label>
+  <input type="text" id="apiKey" placeholder="(required unless backend auth is disabled)" />
+  <div class="muted">Sent as <code>X-API-Key</code> to the backend. Get this from whoever runs your PhishNet backend. Leave blank only for a local backend started with <code>PHISHNET_AUTH_DISABLED=1</code>.</div>
+
   <label for="method">Engines</label>
   <input type="text" id="method" placeholder="heuristic,bert" />
   <div class="muted">Comma-separated: heuristic, bert, llm. (LLM is slower/heavier — leave it off unless your backend has it.)</div>

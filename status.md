@@ -1,6 +1,60 @@
 # PhishNet — Status
 
-_Last updated: 2026-06-15_
+_Last updated: 2026-06-18_
+
+## 2026-06-18 — Security hardening pass
+
+Worked through `SECURITY_AUDIT.md`. Done:
+
+- **API auth + tenant isolation:** every endpoint now requires an API key/bearer
+  token (`app/security.py`, `PHISHNET_API_KEYS`); emails carry an `owner_id` and all
+  reads/lists/deletes are owner-scoped (migration `..._email_owner`). A caller can no
+  longer read or delete everyone's stored mail.
+- **`/analyze` 422 bug fixed:** removed `from __future__ import annotations` from
+  `app/main.py` — under PEP 563 the slowapi `@limiter.limit` wrapper left the body
+  model as an unresolved string, so FastAPI misread the body as a query param and
+  **every analyze request 422'd**. Eager annotations restore correct routing.
+- **CORS** restricted to the methods/headers actually used (no more `*`).
+- **Email PII:** removed the raw-LLM-response debug logging; LLM prompt now wraps the
+  email in a delimited "treat as untrusted data" block (prompt-injection mitigation);
+  added owner-scoped retention/deletion endpoints.
+- **Rate limiting** on `/analyze` and the Chromium-spawning `/open-safely`.
+- **Extension XSS:** `content.js` builds the verdict panel via DOM/`textContent`
+  instead of interpolating backend values into `innerHTML`.
+- **Runner SSRF** (`server.js`): blocks IPv6 loopback/ULA, link-local + cloud
+  metadata `169.254.169.254`, and resolves-then-validates against DNS rebinding.
+- **Supply chain:** lockfiles for `apps/web` + `apps/runner`; pinned torch/transformers.
+- **Tests + CI:** `tests/test_api.py` (auth, ownership, CORS) added — full suite
+  **58 passing**; added `.github/workflows/ci.yml`; `docs/DATA_RETENTION.md`.
+
+(The recency-weighted training work below is unchanged.)
+
+## 2026-06-18 — Recency-weighted training + use-all-data scaling
+
+`bert/train.py` now scales up and weights examples by how recent their source is.
+
+- **Recency weighting** ("range by time/age"): each row weighted by source vintage
+  with exponential decay (half-life `PHISHNET_RECENCY_HALFLIFE_YEARS`, default 4y).
+  Enron(2002)≈0.02, SMS(2011)≈0.07, github(2020)≈0.35, zefang(2022)≈0.50,
+  Deysi(2023)≈0.60, cybersectony(2024)≈0.71. Applied as a per-sample weight in the
+  loss (WeightedTrainer, CE reduction="none"; `remove_unused_columns=False`).
+- **Use-all-data**: `PHISHNET_BALANCE` = `cap` (default; keep all minority +
+  majority up to `PHISHNET_MAX_IMBALANCE`× , default 2) / `downsample` (old) / `all`.
+  Stops discarding the ~5k benign that hard-balancing threw away.
+- **Age cutoff**: `PHISHNET_MAX_AGE_YEARS` (0=off) drops sources older than N years.
+- **Speed knobs for big runs**: `PHISHNET_MAX_LENGTH` (default 512; 256 ~2× faster),
+  `PHISHNET_EPOCHS` (use ~3 for large data). Per-source vintages in `SOURCE_VINTAGE`.
+- Strategy recorded in `training_meta.json` (balance_mode, recency, halflife, age).
+
+Honest ceiling: ~27k labeled *phishing* exist across current sources, so a clean
+balanced 1M isn't available publicly — to actually approach that, add more corpora
+to `load_all_hf_datasets` (tag each with a `SOURCE_VINTAGE`). Recency weighting is
+the real precision lever, not raw count.
+
+Recommended big run (PowerShell):
+  $env:PHISHNET_BALANCE="all"; $env:PHISHNET_EPOCHS="3"; $env:PHISHNET_MAX_LENGTH="256"; python train.py
+
+---
 
 ## 2026-06-15 — Free browser extension + BERT skew fix
 

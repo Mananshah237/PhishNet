@@ -20,6 +20,11 @@ class Email(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     source: Mapped[str] = mapped_column(String, default="upload:eml")
 
+    # Tenant/owner scoping: every email belongs to the API caller (owner id
+    # resolved from their API key) so callers cannot read or delete each other's
+    # data. Defaults to "local" for the auth-disabled local dev mode.
+    owner_id: Mapped[str] = mapped_column(String, default="local", index=True)
+
     subject: Mapped[str | None] = mapped_column(String, nullable=True)
     from_addr: Mapped[str | None] = mapped_column(String, nullable=True)
     to_addr: Mapped[str | None] = mapped_column(String, nullable=True)

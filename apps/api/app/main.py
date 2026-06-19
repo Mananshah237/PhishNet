@@ -1,5 +1,8 @@
-from __future__ import annotations
-
+# NOTE: do NOT add `from __future__ import annotations` here. The slowapi
+# @limiter.limit decorators wrap the route functions, and under PEP 563 the
+# body-model annotations (e.g. AnalyzeRequest) become unresolved strings in the
+# wrapper's module globals, so FastAPI misclassifies the request body as a query
+# param and returns 422 on every call. Eager annotations keep the routes correct.
 import json
 import os
 import re
@@ -12,11 +15,15 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 import httpx
+
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
@@ -24,6 +31,7 @@ from sqlalchemy.orm import Session
 from app.db import SessionLocal
 from app.models import Artifact, Detection, Email, OpenSafelyJob, Rewrite
 from app.auth_results import parse_authentication_from_raw_headers
+from app.security import require_owner
 
 from dotenv import load_dotenv
 
@@ -609,6 +617,24 @@ def get_db() -> Session:
 
 app = FastAPI(title="PhishNet API", version="0.1.0")
 
+# ---- Rate limiting ----------------------------------------------------------
+# Throttle abuse-prone endpoints. Keyed by client IP (slowapi default). The
+# per-endpoint limits are applied via @limiter.limit decorators below; this also
+# installs a global default so every endpoint has a baseline cap.
+_DEFAULT_RATE = os.getenv("PHISHNET_RATE_DEFAULT", "120/minute")
+limiter = Limiter(key_func=get_remote_address, default_limits=[_DEFAULT_RATE])
+app.state.limiter = limiter
+
+
+def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": f"rate limit exceeded: {exc.detail}"},
+    )
+
+
+app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
+
 # Allowed origins are configurable so the same backend works locally and when
 # hosted. Browser extensions (Chrome/Edge/Firefox) are allowed via regex.
 _DEFAULT_ORIGINS = (
@@ -621,13 +647,29 @@ _ALLOWED_ORIGINS = [
     if o.strip()
 ]
 
+# CORS is intentionally restricted:
+#  - allow_origins: explicit web origins (configurable via PHISHNET_ALLOWED_ORIGINS).
+#  - allow_origin_regex: browser-extension origins. Chrome/Firefox assign each
+#    installed extension a random, per-install origin (chrome-extension://<id>),
+#    so we cannot enumerate the published ID at build time across forks/dev
+#    builds; the regex scopes access to the extension scheme only. Auth is the
+#    real control (every data endpoint requires an API key), so a hostile
+#    extension still cannot read data without a valid key. To lock this down to a
+#    single published extension, set PHISHNET_EXTENSION_ORIGIN_REGEX to e.g.
+#    r"chrome-extension://<your-id>".
+_EXT_ORIGIN_REGEX = os.getenv(
+    "PHISHNET_EXTENSION_ORIGIN_REGEX",
+    r"chrome-extension://.*|moz-extension://.*",
+)
+
+# Only the methods/headers the app actually uses, instead of "*".
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ALLOWED_ORIGINS,
-    allow_origin_regex=r"chrome-extension://.*|moz-extension://.*",
+    allow_origin_regex=_EXT_ORIGIN_REGEX,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key", "Authorization"],
 )
 
 
@@ -666,7 +708,11 @@ def health(db: Session = Depends(get_db)):
     return {"ok": True, "artifact_dir": _artifact_dir(), "db": "ok"}
 
 @app.post("/ingest/upload-eml")
-async def upload_eml(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_eml(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    owner: str = Depends(require_owner),
+):
     raw = await file.read()
     if len(raw) > 5_000_000:
         raise HTTPException(status_code=413, detail="file too large (max 5MB)")
@@ -707,6 +753,7 @@ async def upload_eml(file: UploadFile = File(...), db: Session = Depends(get_db)
 
     email = Email(
         id=str(uuid.uuid4()),
+        owner_id=owner,
         source="upload:eml",
         subject=subject,
         from_addr=from_addr,
@@ -742,7 +789,13 @@ class AnalyzeRequest(BaseModel):
 
 
 @app.post("/analyze", response_model=DetectionResult)
-async def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
+@limiter.limit(os.getenv("PHISHNET_RATE_ANALYZE", "30/minute"))
+async def analyze(
+    request: Request,
+    req: AnalyzeRequest,
+    db: Session = Depends(get_db),
+    owner: str = Depends(require_owner),
+):
     """One-shot analyze for the extension: ingest structured fields + detect."""
     text_body = req.body_text or ""
     html_body = req.body_html or ""
@@ -758,6 +811,7 @@ async def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
 
     email = Email(
         id=str(uuid.uuid4()),
+        owner_id=owner,
         source="api:analyze",
         subject=req.subject or "",
         from_addr=req.from_addr or "",
@@ -774,12 +828,18 @@ async def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
     db.commit()
 
     # Reuse the exact detection + mail-auth pipeline used by /detect.
-    return await detect(email.id, req.method, db)
+    return await _detect_owned(email.id, req.method, db, owner)
 
 
 @app.get("/emails", response_model=list[EmailListItem])
-def list_emails(db: Session = Depends(get_db)):
-    emails = db.query(Email).order_by(Email.created_at.desc()).limit(200).all()
+def list_emails(db: Session = Depends(get_db), owner: str = Depends(require_owner)):
+    emails = (
+        db.query(Email)
+        .filter(Email.owner_id == owner)
+        .order_by(Email.created_at.desc())
+        .limit(200)
+        .all()
+    )
     return [
         EmailListItem(
             id=e.id,
@@ -793,8 +853,16 @@ def list_emails(db: Session = Depends(get_db)):
 
 
 @app.delete("/emails/{email_id}")
-def delete_email(email_id: str, db: Session = Depends(get_db)):
-    e = db.query(Email).filter(Email.id == email_id).first()
+def delete_email(
+    email_id: str,
+    db: Session = Depends(get_db),
+    owner: str = Depends(require_owner),
+):
+    e = (
+        db.query(Email)
+        .filter(Email.id == email_id, Email.owner_id == owner)
+        .first()
+    )
     if not e:
         raise HTTPException(status_code=404, detail="email not found")
     db.delete(e)
@@ -803,8 +871,16 @@ def delete_email(email_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/emails/{email_id}")
-def get_email(email_id: str, db: Session = Depends(get_db)):
-    e = db.query(Email).filter(Email.id == email_id).first()
+def get_email(
+    email_id: str,
+    db: Session = Depends(get_db),
+    owner: str = Depends(require_owner),
+):
+    e = (
+        db.query(Email)
+        .filter(Email.id == email_id, Email.owner_id == owner)
+        .first()
+    )
     if not e:
         raise HTTPException(status_code=404, detail="email not found")
 
@@ -829,6 +905,54 @@ def get_email(email_id: str, db: Session = Depends(get_db)):
             "rewrite": (None if not rw else {"safe_subject": rw.safe_subject, "safe_body": rw.safe_body, "used_llm": rw.used_llm}),
         },
     }
+
+
+def _retention_days() -> int:
+    """Email PII retention window in days (0 disables auto-purge)."""
+    try:
+        return int(os.getenv("PHISHNET_RETENTION_DAYS", "30"))
+    except ValueError:
+        return 30
+
+
+@app.delete("/emails")
+def delete_all_emails(db: Session = Depends(get_db), owner: str = Depends(require_owner)):
+    """Right-to-erasure: delete ALL emails (and cascaded detections/rewrites/jobs)
+    belonging to the calling owner. See docs/DATA_RETENTION.md."""
+    deleted = (
+        db.query(Email)
+        .filter(Email.owner_id == owner)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return {"ok": True, "deleted_count": int(deleted)}
+
+
+@app.post("/admin/retention/purge")
+def purge_expired_emails(db: Session = Depends(get_db), owner: str = Depends(require_owner)):
+    """Purge the caller's emails older than the configured retention window.
+
+    Intended to be invoked on a schedule (cron / container job). Returns the
+    number of rows removed. Cascades to detections/rewrites/jobs/artifacts via
+    the ORM relationship cascade.
+    """
+    days = _retention_days()
+    if days <= 0:
+        return {"ok": True, "purged_count": 0, "retention_days": days, "note": "auto-purge disabled"}
+
+    from datetime import timedelta
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    expired = (
+        db.query(Email)
+        .filter(Email.owner_id == owner, Email.created_at < cutoff)
+        .all()
+    )
+    count = len(expired)
+    for e in expired:
+        db.delete(e)  # ORM delete to honor cascade relationships
+    db.commit()
+    return {"ok": True, "purged_count": count, "retention_days": days}
 
 
 def _bert_enabled() -> bool:
@@ -933,8 +1057,21 @@ def available_methods():
 
 
 @app.post("/emails/{email_id}/detect", response_model=DetectionResult)
-async def detect(email_id: str, method: str = "heuristic", db: Session = Depends(get_db)):
-    e = db.query(Email).filter(Email.id == email_id).first()
+async def detect(
+    email_id: str,
+    method: str = "heuristic",
+    db: Session = Depends(get_db),
+    owner: str = Depends(require_owner),
+):
+    return await _detect_owned(email_id, method, db, owner)
+
+
+async def _detect_owned(email_id: str, method: str, db: Session, owner: str) -> "DetectionResult":
+    e = (
+        db.query(Email)
+        .filter(Email.id == email_id, Email.owner_id == owner)
+        .first()
+    )
     if not e:
         raise HTTPException(status_code=404, detail="email not found")
 
@@ -1003,8 +1140,17 @@ async def detect(email_id: str, method: str = "heuristic", db: Session = Depends
 
 
 @app.post("/emails/{email_id}/rewrite", response_model=RewriteResult)
-async def rewrite(email_id: str, use_llm: bool = False, db: Session = Depends(get_db)):
-    e = db.query(Email).filter(Email.id == email_id).first()
+async def rewrite(
+    email_id: str,
+    use_llm: bool = False,
+    db: Session = Depends(get_db),
+    owner: str = Depends(require_owner),
+):
+    e = (
+        db.query(Email)
+        .filter(Email.id == email_id, Email.owner_id == owner)
+        .first()
+    )
     if not e:
         raise HTTPException(status_code=404, detail="email not found")
 
@@ -1052,8 +1198,19 @@ Original email:
 
 
 @app.post("/emails/{email_id}/open-safely")
-async def open_safely(email_id: str, req: OpenSafelyRequest, db: Session = Depends(get_db)):
-    e = db.query(Email).filter(Email.id == email_id).first()
+@limiter.limit(os.getenv("PHISHNET_RATE_OPEN_SAFELY", "5/minute"))
+async def open_safely(
+    request: Request,
+    email_id: str,
+    req: OpenSafelyRequest,
+    db: Session = Depends(get_db),
+    owner: str = Depends(require_owner),
+):
+    e = (
+        db.query(Email)
+        .filter(Email.id == email_id, Email.owner_id == owner)
+        .first()
+    )
     if not e:
         raise HTTPException(status_code=404, detail="email not found")
 
@@ -1131,11 +1288,26 @@ async def open_safely(email_id: str, req: OpenSafelyRequest, db: Session = Depen
         },
     }
 
-@app.get("/open-safely/status/{job_id}")
-def open_safely_status(job_id: str, db: Session = Depends(get_db)):
-    job = db.query(OpenSafelyJob).filter(OpenSafelyJob.job_id == job_id).first()
+def _owned_job(job_id: str, db: Session, owner: str) -> OpenSafelyJob:
+    """Fetch a job, ensuring its parent email belongs to the caller."""
+    job = (
+        db.query(OpenSafelyJob)
+        .join(Email, Email.id == OpenSafelyJob.email_id)
+        .filter(OpenSafelyJob.job_id == job_id, Email.owner_id == owner)
+        .first()
+    )
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
+@app.get("/open-safely/status/{job_id}")
+def open_safely_status(
+    job_id: str,
+    db: Session = Depends(get_db),
+    owner: str = Depends(require_owner),
+):
+    job = _owned_job(job_id, db, owner)
     return {
         "job_id": job.job_id,
         "email_id": job.email_id,
@@ -1149,10 +1321,12 @@ def open_safely_status(job_id: str, db: Session = Depends(get_db)):
     }
 
 @app.get("/open-safely/artifacts/{job_id}")
-def open_safely_artifacts(job_id: str, db: Session = Depends(get_db)):
-    job = db.query(OpenSafelyJob).filter(OpenSafelyJob.job_id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="job not found")
+def open_safely_artifacts(
+    job_id: str,
+    db: Session = Depends(get_db),
+    owner: str = Depends(require_owner),
+):
+    job = _owned_job(job_id, db, owner)
 
     artifacts = db.query(Artifact).filter(Artifact.job_id == job_id).order_by(Artifact.id.asc()).all()
     return {
@@ -1171,7 +1345,14 @@ def open_safely_artifacts(job_id: str, db: Session = Depends(get_db)):
     }
 
 @app.get("/open-safely/download/{job_id}")
-def open_safely_download(job_id: str, name: str, db: Session = Depends(get_db)):
+def open_safely_download(
+    job_id: str,
+    name: str,
+    db: Session = Depends(get_db),
+    owner: str = Depends(require_owner),
+):
+    # Ensure the job belongs to the caller before serving any artifact bytes.
+    _owned_job(job_id, db, owner)
     a = db.query(Artifact).filter(Artifact.job_id == job_id, Artifact.name == name).first()
     if not a:
         raise HTTPException(status_code=404, detail="not found")

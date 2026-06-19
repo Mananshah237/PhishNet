@@ -1,6 +1,7 @@
 async function load() {
   const cfg = await pnGetConfig();
   document.getElementById("backendUrl").value = cfg.backendUrl;
+  document.getElementById("apiKey").value = cfg.apiKey || "";
   document.getElementById("method").value = cfg.method;
   document.getElementById("personalize").checked = cfg.personalize;
   showStats();
@@ -17,6 +18,7 @@ async function showStats() {
 document.getElementById("save").onclick = async () => {
   await pnSetConfig({
     backendUrl: document.getElementById("backendUrl").value.trim() || PN_DEFAULTS.backendUrl,
+    apiKey: document.getElementById("apiKey").value.trim(),
     method: document.getElementById("method").value.trim() || PN_DEFAULTS.method,
     personalize: document.getElementById("personalize").checked,
   });
