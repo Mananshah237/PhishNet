@@ -103,12 +103,29 @@ git lfs pull
 
 ### 3. Configure environment
 
-Create a `.env` in the **repository root** (values match `docker-compose`):
+Create a `.env` in the **repository root** (the `api` service reads it via `env_file`).
+Every data endpoint now **requires an API key and fails closed** (returns `503` if no
+keys are configured), so you must set one of the two auth options below:
 
 ```ini
 DATABASE_URL=sqlite:///data/phishnet.db
 OLLAMA_BASE_URL=http://ollama:11434
+
+# --- Auth (pick ONE) ---------------------------------------------------------
+# A) Provision keys. Format: key or key:owner_id, comma-separated. The owner_id
+#    scopes stored emails to the caller. Use a strong random key in production.
+PHISHNET_API_KEYS=dev-key-local:web
+
+# B) Local dev only — disable auth entirely (all data shares one "local" owner):
+# PHISHNET_AUTH_DISABLED=1
+
+# Optional: restrict CORS / extension origin, email retention window
+# PHISHNET_ALLOWED_ORIGINS=http://localhost:3002
+# PHISHNET_RETENTION_DAYS=30
 ```
+
+> The browser extension must send the same key — set it in the extension's Options
+> page (it is attached as the `X-API-Key` header on each `/analyze` call).
 
 ### 4. Launch
 
@@ -142,6 +159,16 @@ Example:
 * `bert: false` → check LFS / `bert/model/`  
 * `llm: false` → wait for Ollama or check `docker compose logs ollama`
 
+`/health` and `/detect/methods` are public; everything that touches email data needs
+the key. Example analyze call:
+
+```bash
+curl -s -X POST http://localhost:8002/analyze \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: dev-key-local" \
+  -d '{"subject":"Verify your account","from_addr":"no-reply@paypa1.tk","body_text":"Click to confirm","method":"heuristic"}'
+```
+
 ### SQLite database file
 
 The app uses **`apps/api/data/phishnet.db`** (bind-mounted in Docker). The database file is **local and environment-specific** and is **not intended to be committed** to Git (see `.gitignore`). After clone, the API creates or uses the file under `apps/api/data/` when you run migrations or ingest email.
@@ -152,7 +179,15 @@ The app uses **`apps/api/data/phishnet.db`** (bind-mounted in Docker). The datab
 cd apps/api
 pip install -r requirements.txt
 alembic upgrade head
+# Set auth (or PHISHNET_AUTH_DISABLED=1) — data endpoints fail closed otherwise:
+export PHISHNET_API_KEYS=dev-key-local:web
 uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+You also need the **runner** for the *open-safely* feature:
+
+```bash
+cd apps/runner && npm install && node server.js   # listens on :7070
 ```
 
 Set `DATABASE_URL` if you want a path outside the default. For LLM detection, run Ollama on the host and point `OLLAMA_BASE_URL` at it (e.g. `http://127.0.0.1:11434`).
