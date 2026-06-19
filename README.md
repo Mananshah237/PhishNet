@@ -82,6 +82,10 @@ FastAPI Backend (port 8000)
 
 ## Quick Start
 
+**Windows one-click:** run **`run.bat`** — it runs `git lfs pull`, writes a `.env` with a
+dev API key, and starts the stack. The manual steps below are equivalent (and what to
+follow on macOS/Linux).
+
 ### 1. Install Git LFS
 
 ```bash
